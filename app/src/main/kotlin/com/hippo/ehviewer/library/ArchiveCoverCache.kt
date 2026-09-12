@@ -85,7 +85,15 @@ object ArchiveCoverCache {
     private const val THUMB_WEBP_QUALITY = OriginDiskCache.THUMB_QUALITY
     private const val FORMAT_VERSION = 2
 
+    /**
+     * Parallel first-page extracts. ZIP (and documents) never take the process-global
+     * [ArchiveAccess] native session, so these really do run at once; native-format
+     * covers queue behind [ArchiveAccess.tryWithArchiveQueued] instead.
+     */
     private val extractSlots = Semaphore(10)
+
+    /** Single-member ZIP cover cap; a larger page 0 falls back to the native path. */
+    private const val ZIP_COVER_MAX_BYTES = ZipCentralDirectory.MAX_EXTRACT_BYTES
 
     /**
      * JPEG/UHDR cover encode runs here — **not** as a child of [ArchiveAccess.withArchive].
@@ -436,6 +444,13 @@ object ArchiveCoverCache {
         val dest = destOverride ?: thumbPathFor(cacheKey, 0L, 0L)
         existingCover(dest)?.let { return CoverEnsureResult.Hit(it) }
         val isZip = fileName.isNotEmpty() && isZipArchiveFileName(fileName)
+        // ZIP page 0 is pure Kotlin (EOCD/CD + Inflater in [ZipCentralDirectory]), so it does
+        // not need the process-global libarchive session — grid cells extract in parallel.
+        // Anything this cannot decide (empty/password/odd member) falls through to the native
+        // path below, which keeps the existing results.
+        if (isZip) {
+            zipCoverParallel(cacheKey, openSource, dest)?.let { return it }
+        }
         val outcome = extractSlots.withPermit {
             existingCover(dest)?.let {
                 return@withPermit StreamExtractOutcome.Terminal(CoverEnsureResult.Hit(it))
@@ -452,7 +467,7 @@ object ArchiveCoverCache {
             // registerAbortAction closes the network source so blocking Range reads unblock
             // when a reader preempts (native abort alone cannot cancel CIO/smbj mid-read).
             try {
-                ArchiveAccess.tryWithArchive {
+                ArchiveAccess.tryWithArchiveQueued {
                     openSource().use { source ->
                         ArchiveAccess.registerAbortAction {
                             runCatching { source.close() }
@@ -537,6 +552,181 @@ object ArchiveCoverCache {
                 if (thumb != null) CoverEnsureResult.Hit(thumb) else CoverEnsureResult.Skip
             }
         }
+    }
+
+    /**
+     * Parallel ZIP first-page cover. Runs under [extractSlots] but takes **no** native archive
+     * session, so several archives extract at once (network reads are still bounded by the
+     * SMB/WebDAV transfer gates).
+     *
+     * @return null when the pure-Kotlin path cannot decide — the caller then uses the native
+     *   libarchive path, so empty / passworded / unusual archives keep their old results.
+     */
+    private suspend fun zipCoverParallel(
+        cacheKey: String,
+        openSource: suspend () -> ArchiveByteSource,
+        dest: Path,
+    ): CoverEnsureResult? {
+        var cached = false
+        val page = extractSlots.withPermit {
+            if (existingCover(dest) != null) {
+                cached = true
+                null
+            } else {
+                zipCoverBytesFromCd(cacheKey, openSource)
+            }
+        }
+        if (cached) return existingCover(dest)?.let { CoverEnsureResult.Hit(it) }
+        val bytes = page ?: return null
+        // Encode outside the permit (ImageDecoder / libultrahdr), like the native path.
+        currentCoroutineContext().ensureActive()
+        val thumb = try {
+            encodePage0Jpeg(bytes.bytes, bytes.extHint, dest)
+            existingCover(dest)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            logcat("ArchiveCover", e)
+            null
+        }
+        return if (thumb != null) CoverEnsureResult.Hit(thumb) else CoverEnsureResult.Skip
+    }
+
+    /**
+     * Page 0 of a ZIP via [ZipCentralDirectory] (EOCD + CD + store/deflate).
+     *
+     * Member choice mirrors native `openArchiveStream(coverOnly = false)` for ZIP: the
+     * **first playable entry in CD order** (native image ext, no `__MACOSX`/AppleDouble,
+     * store/deflate, `0 < size < 2 GiB`).
+     */
+    private suspend fun zipCoverBytesFromCd(
+        cacheKey: String,
+        openSource: suspend () -> ArchiveByteSource,
+    ): Page0Bytes? = try {
+        openSource().use { source ->
+            val size = runCatching { source.size }.getOrDefault(0L)
+            val cd = ZipCentralDirectory.open(source) ?: return@use null
+            val cover = cd.entries.firstOrNull(::isZipCoverEntry) ?: return@use null
+            // Encrypted / oversized members: let the native path decide (same as before).
+            if (cover.isEncrypted || cover.uncompressedSize > ZIP_COVER_MAX_BYTES) return@use null
+            val bytes = cd.extract(cover, ZIP_COVER_MAX_BYTES) ?: return@use null
+            persistZipCdIndexIfAbsent(cacheKey, size, cd.entries)
+            // Same ext hint the native path derives from getExtension(0).
+            Page0Bytes(bytes, zipMemberExt(cover.name))
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        logcat("ArchiveCover", e)
+        null
+    }
+
+    /**
+     * Persist the ZIP CD as a seek table exactly like [persistZipSeekIndex] does from the
+     * native entry list (playable members, CD order, local-header offsets), so opening the
+     * gallery still skips the EOCD/CD parse. Skipped when a usable index already exists.
+     */
+    private fun persistZipCdIndexIfAbsent(
+        cacheKey: String,
+        archiveSize: Long,
+        entries: List<ZipCentralDirectory.Entry>,
+    ) {
+        val existing = ArchiveStreamPageCache.loadIndex(cacheKey)
+        if (existing != null && existing.hasFullSeekIndex() &&
+            (existing.remoteSize <= 0L || existing.remoteSize == archiveSize)
+        ) {
+            return
+        }
+        val members = ArrayList<ArchiveStreamPageCache.Member>(entries.size)
+        var i = 0
+        for (e in entries) {
+            if (!isZipCoverEntry(e)) continue
+            members += ArchiveStreamPageCache.Member(
+                i = i,
+                name = "",
+                ext = zipMemberExt(e.name),
+                uncSize = e.uncompressedSize,
+                offset = e.localHeaderOffset,
+                compSize = e.compressedSize,
+                method = e.method,
+            )
+            i++
+        }
+        if (members.isEmpty() || !members.all { it.hasSeek }) return
+        ArchiveStreamPageCache.saveIndexAsync(
+            ArchiveStreamPageCache.Index(
+                v = ArchiveStreamPageCache.INDEX_VERSION,
+                cacheKey = cacheKey,
+                remoteSize = archiveSize,
+                format = "zip",
+                complete = false,
+                structureComplete = true,
+                members = members,
+            ),
+        )
+    }
+
+    /**
+     * Native `filename_is_playable_file` filter for a CD entry: image extension, store or
+     * deflate, `0 < uncompressed < 2 GiB`, and no macOS resource-fork junk.
+     */
+    private fun isZipCoverEntry(e: ZipCentralDirectory.Entry): Boolean =
+        !e.isDirectory &&
+            (e.method == ZipCentralDirectory.METHOD_STORE ||
+                e.method == ZipCentralDirectory.METHOD_DEFLATE) &&
+            e.uncompressedSize > 0L &&
+            e.uncompressedSize < (1L shl 31) &&
+            !isMacOsJunkZipName(e.name) &&
+            zipCoverExt(e.name) in IMAGE_EXTENSIONS
+
+    /**
+     * Native `filename_is_macos_junk`: any `__MACOSX` path segment, an AppleDouble
+     * `._name` basename, or an empty/dot basename.
+     */
+    private fun isMacOsJunkZipName(name: String): Boolean {
+        var segStart = 0
+        for (p in 0..name.length) {
+            if (p == name.length || name[p] == '/' || name[p] == '\\') {
+                if (p - segStart == "__MACOSX".length &&
+                    name.regionMatches(segStart, "__MACOSX", 0, 8, ignoreCase = true)
+                ) {
+                    return true
+                }
+                segStart = p + 1
+            }
+        }
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        if (base.startsWith("._")) return true
+        return base.isEmpty() || base == "." || base == ".."
+    }
+
+    /**
+     * Native `getExtension`: the raw substring after the last `.` (case kept), `"bin"` when
+     * the name has none. Feeds [ArchiveStreamPageCache] page file names, so it must not be
+     * normalized.
+     */
+    private fun zipMemberExt(name: String): String {
+        val dot = name.lastIndexOf('.')
+        if (dot < 0 || dot == name.length - 1) return "bin"
+        return name.substring(dot + 1).ifBlank { "bin" }
+    }
+
+    /**
+     * Native playable-extension rule: characters after the last `.`, ASCII alphanumeric
+     * only, at most 7, lowercased (so `"001.jpg "` still counts as `jpg`).
+     */
+    private fun zipCoverExt(name: String): String {
+        val dot = name.lastIndexOf('.')
+        if (dot < 0 || dot == name.length - 1) return ""
+        val sb = StringBuilder(8)
+        var i = dot + 1
+        while (i < name.length && sb.length < 7) {
+            val c = name[i].lowercaseChar()
+            if (c !in 'a'..'z' && c !in '0'..'9') break
+            sb.append(c)
+            i++
+        }
+        return sb.toString()
     }
 
     /** Load [ArchiveStreamPageCache] seek table and bind for page-0 extract. */
@@ -787,7 +977,7 @@ object ArchiveCoverCache {
             }
 
             try {
-                ArchiveAccess.tryWithArchive {
+                ArchiveAccess.tryWithArchiveQueued queued@{
                     openSource().use { source ->
                         ArchiveAccess.registerAbortAction {
                             runCatching { source.close() }
@@ -801,19 +991,19 @@ object ArchiveCoverCache {
                                 }
                                 if (opened == 0) {
                                     logcat("SolidCover") { "openSolidSequential failed key=$cacheKey" }
-                                    return@tryWithArchive SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
+                                    return@queued SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
                                 }
                                 currentCoroutineContext().ensureActive()
                                 val idx = bridge.checkedNative { solidNextPlayable() }
                                 if (idx < 0) {
                                     if (needPassword()) {
                                         logcat("SolidCover") { "passworded solid skipped key=$cacheKey" }
-                                        return@tryWithArchive SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
+                                        return@queued SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
                                     }
                                     val limited = isArchiveScanLimited()
                                     val wholeFileInBudget =
                                         scanCap > 0L && archiveSize > 0L && archiveSize <= scanCap
-                                    return@tryWithArchive SolidExtractOutcome.Terminal(
+                                    return@queued SolidExtractOutcome.Terminal(
                                         when {
                                             limited && !wholeFileInBudget -> {
                                                 logcat("SolidCover") {
@@ -831,7 +1021,7 @@ object ArchiveCoverCache {
                                 currentCoroutineContext().ensureActive()
                                 if (needPassword()) {
                                     logcat("SolidCover") { "passworded solid skipped key=$cacheKey" }
-                                    return@tryWithArchive SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
+                                    return@queued SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
                                 }
                                 val ext = solidCurrentExtension().ifBlank { "bin" }.take(8)
                                 val tmp = File(
@@ -848,12 +1038,12 @@ object ArchiveCoverCache {
                                     if (!bridge.checkedNative { solidExtractCurrentToFd(pfd.fd) }) {
                                         logcat("SolidCover") { "extract page0 failed key=$cacheKey" }
                                         tmp.delete()
-                                        return@tryWithArchive SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
+                                        return@queued SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
                                     }
                                 }
                                 if (!tmp.isFile || tmp.length() == 0L) {
                                     tmp.delete()
-                                    return@tryWithArchive SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
+                                    return@queued SolidExtractOutcome.Terminal(CoverEnsureResult.Skip)
                                 }
                                 runCatching {
                                     SolidExtractCache.writePageFromFdCopy(cacheKey, 0, ext, tmp)

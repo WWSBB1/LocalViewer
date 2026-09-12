@@ -120,7 +120,9 @@ object WebDavClient {
     private val listSlots = Semaphore(6)
 
     private const val DOWNLOAD_SLOTS_MIN = 2
-    private const val DOWNLOAD_SLOTS_MAX = 8
+
+    /** Must cover the largest `webdav_download_slots` value in `arrays.xml`. */
+    private const val DOWNLOAD_SLOTS_MAX = 10
 
     private val downloadSlotsLock = Any()
     private var downloadSlotsCap = -1

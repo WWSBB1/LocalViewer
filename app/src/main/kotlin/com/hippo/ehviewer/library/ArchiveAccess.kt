@@ -10,7 +10,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Serializes libarchive JNI ([com.hippo.ehviewer.jni.openArchive] is process-global).
@@ -45,6 +47,22 @@ object ArchiveAccess {
      * can unblock a blocking read by closing the transport, not only canceling coroutines.
      */
     private val abortAction = AtomicReference<(() -> Unit)?>(null)
+
+    /**
+     * Cover extract queue. The native archive session is process-global, so only one cover
+     * open/extract can run at a time: without this queue a second [tryWithArchiveQueued]
+     * caller loses `tryLock()` and gets null (callers read that as "skip, retry later")
+     * even when no reader is competing at all.
+     */
+    private val coverQueue = Semaphore(1)
+
+    /**
+     * Cover extract: queued behind other covers, still skipped while a reader is
+     * pending/holding (readers keep preempting covers).
+     * @return null if a reader arrived — same contract as [tryWithArchive].
+     */
+    suspend fun <T> tryWithArchiveQueued(block: suspend () -> T): T? =
+        coverQueue.withPermit { tryWithArchive(block) }
 
     /**
      * Register [action] to run when a reader preempts (or immediately if a reader is already
