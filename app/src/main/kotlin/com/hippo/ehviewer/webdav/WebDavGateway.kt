@@ -53,7 +53,7 @@ object WebDavGateway {
     /** Deep peek/classify budget after shallow paint; keep shallow on expiry. */
     private const val DEEP_CLASSIFY_TIMEOUT_MS = 180_000L
 
-    private const val PEEK_CONCURRENCY_MAX = 7
+    private const val PEEK_CONCURRENCY_MAX = 20
 
     /** Subfolder PROPFIND / zip-root fan-out. Advanced → WebDAV concurrent listing. */
     private fun peekConcurrency(): Int = Settings.webDavConcurrentListing.value.coerceIn(3, PEEK_CONCURRENCY_MAX)

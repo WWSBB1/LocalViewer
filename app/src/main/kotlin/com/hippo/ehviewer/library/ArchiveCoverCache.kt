@@ -85,7 +85,7 @@ object ArchiveCoverCache {
     private const val THUMB_WEBP_QUALITY = OriginDiskCache.THUMB_QUALITY
     private const val FORMAT_VERSION = 2
 
-    private val extractSlots = Semaphore(1)
+    private val extractSlots = Semaphore(10)
 
     /**
      * JPEG/UHDR cover encode runs here — **not** as a child of [ArchiveAccess.withArchive].

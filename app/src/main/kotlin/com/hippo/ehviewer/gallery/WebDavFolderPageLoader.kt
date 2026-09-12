@@ -47,7 +47,7 @@ suspend inline fun <T> useWebDavFolderPageLoader(
         check(imageFileNames.isNotEmpty()) { "No images in WebDAV folder" }
         val password = WebDavPasswordStore.get(source.id)
         val size = imageFileNames.size
-        val interactiveSlots = Semaphore(1)
+        val interactiveSlots = Semaphore(10)
         val prefetchSlots = Semaphore(3)
         // Cap concurrent lib downloads; full UHDR convert is serial in HdrConvertCache.
         val libHdrPrefetchSlots = Semaphore(2)
