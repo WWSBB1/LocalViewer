@@ -44,10 +44,10 @@ object OriginDiskCache {
     const val THUMB_LEGACY_EXT = "jpg"
 
     /** Lossy WebP quality for new thumbs (JPEG leftovers keep their original bytes). */
-    const val THUMB_QUALITY = 85
+    const val THUMB_QUALITY = 60
 
     /** Shared budget for all on-disk thumb stores (not Coil’s separate 256 MiB). */
-    const val THUMB_BUDGET_BYTES = 512L * 1024L * 1024L
+    const val ORIGIN_BUDGET_BYTES = 512L * 1024L * 1024L
 
     fun thumbFileName(hash: String): String = "$hash.$THUMB_EXT"
 
@@ -98,7 +98,7 @@ object OriginDiskCache {
 
     private fun cacheDir(name: String): File = File(dataDir, "cache/$name")
 
-    fun originBudgetBytes(): Long = Settings.readCacheSize.value.coerceIn(320, 5120).toLong() * 1024L * 1024L
+    fun originBudgetBytes(): Long = ORIGIN_BUDGET_BYTES
 
     fun scheduleTrim() {
         if (!scheduled.compareAndSet(false, true)) return
@@ -286,19 +286,19 @@ object OriginDiskCache {
     private data class ThumbEntry(val file: File, val mtime: Long, val size: Long)
 
     private fun trimThumbs() {
+        val thumbBudgetBytes = Settings.readCacheSize.value.coerceIn(320, 5120).toLong() * 1024L * 1024L
         val candidates = ArrayList<ThumbEntry>(2048)
         collectThumbFiles(cacheDir("smb_thumb_cache"), candidates)
         collectThumbFiles(cacheDir("webdav_thumb_cache"), candidates)
         collectThumbFiles(cacheDir("archive_thumb"), candidates)
-        // Video frames (local + network) — same shared byte budget as other covers.
         collectThumbFiles(cacheDir("video_thumb_cache"), candidates)
 
         var total = candidates.sumOf { it.size }
-        if (total <= THUMB_BUDGET_BYTES) return
+        if (total <= thumbBudgetBytes) return
 
         candidates.sortWith(compareBy<ThumbEntry> { it.mtime }.thenBy { it.file.path })
         for (e in candidates) {
-            if (total <= THUMB_BUDGET_BYTES) break
+            if (total <= thumbBudgetBytes) break
             if (e.file.delete()) {
                 total -= e.size
                 onThumbDeleted(e.file)
