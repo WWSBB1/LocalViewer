@@ -8,6 +8,8 @@ import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.library.BrowseSession
 import com.hippo.ehviewer.library.RemoteChild
 import com.hippo.ehviewer.library.RemoteRangeNotSupportedException
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipMemberByteSource
 import com.hippo.ehviewer.library.ZipMemberCover
@@ -116,8 +118,11 @@ object WebDavClient {
      */
     private const val TRAFFIC_TAG = 0x57445631
 
-    /** Parallel list/peek concurrency (HTTP/2 multiplex + HTTP/1.1 multi-connection). */
-    private val listSlots = Semaphore(6)
+    /**
+     * Parallel list/peek concurrency (HTTP/2 multiplex + HTTP/1.1 multi-connection).
+     * Advanced → WebDAV concurrent listing; used to be fixed at 6 and ignored the setting.
+     */
+    private val listSlots = SettingSlots { ThumbConcurrency.webDavListing() }
 
     private const val DOWNLOAD_SLOTS_MIN = 2
 
@@ -145,8 +150,14 @@ object WebDavClient {
      * so [SocketChannel] opens are not UntaggedSocketViolation in debug StrictMode.
      */
     private val cioThreadSeq = AtomicInteger(0)
+
+    /**
+     * CIO reads block their worker thread, so the pool must cover the largest permitted
+     * fan-out or the Advanced concurrency settings silently cap out: WebDAV concurrent
+     * downloads (≤[DOWNLOAD_SLOTS_MAX]) + concurrent listing (≤[ThumbConcurrency.WEBDAV_LISTING_MAX]).
+     */
     private val cioExecutor = Executors.newFixedThreadPool(
-        8,
+        DOWNLOAD_SLOTS_MAX + ThumbConcurrency.WEBDAV_LISTING_MAX,
         ThreadFactory { runnable ->
             Thread(
                 {
@@ -503,7 +514,7 @@ object WebDavClient {
         password: String,
         relativeDir: String,
     ): List<RemoteChild> = withIOContext {
-        listSlots.withPermit {
+        listSlots.gate().withPermit {
             withTransportRetry {
                 propfindChildren(source, password, relativeDir)
             }

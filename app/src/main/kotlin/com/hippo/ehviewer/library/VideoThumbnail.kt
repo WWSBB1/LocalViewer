@@ -28,7 +28,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
@@ -116,13 +115,11 @@ sealed interface VideoThumbnailSource {
 object VideoThumbnail {
     private val EDGE_PX: Int get() = OriginDiskCache.THUMB_EDGE
 
-    private const val FAILURE_RETRY_MS = 24L * 60 * 60 * 1_000
-
-    /** Parallel native MMR decodes (and abandoned-worker budget). */
-    private const val MAX_CONCURRENT_EXTRACTIONS = 3
-
-    /** Parallel remote head/tail probes (pipeline with decode). */
-    private const val MAX_CONCURRENT_PROBES = 3
+    /**
+     * How long a `.failed` marker suppresses re-probing a file. Short on purpose: a
+     * transient probe/decode failure must not hide a video's thumbnail for a whole day.
+     */
+    private const val FAILURE_RETRY_MS = 5L * 60 * 1_000
 
     /**
      * Extra pool threads for waiter-abandoned stuck native/I/O (scroll cancel).
@@ -133,18 +130,23 @@ object VideoThumbnail {
 
     private const val MAX_ABANDONED_PROBES = 2
 
-    private const val MAX_DECODE_THREADS = MAX_CONCURRENT_EXTRACTIONS + MAX_ABANDONED_WORKERS
-
-    private const val MAX_PROBE_THREADS = MAX_CONCURRENT_PROBES + MAX_ABANDONED_PROBES
+    /**
+     * Pool sizes are **upper bounds** for the settings-derived semaphores
+     * ([ThumbConcurrency.videoDecode] / [ThumbConcurrency.videoProbe]), so actual
+     * concurrency is whatever the Advanced network settings allow and submissions are
+     * never rejected; threads are created on demand and die when idle.
+     */
+    private val DECODE_POOL_THREADS = ThumbConcurrency.VIDEO_DECODE_MAX + MAX_ABANDONED_WORKERS
+    private val PROBE_POOL_THREADS = ThumbConcurrency.VIDEO_PROBE_MAX + MAX_ABANDONED_PROBES
 
     /** Fetch probe then close remote. Slightly higher for 8 MiB TS heads. */
-    private const val PROBE_IO_TIMEOUT_MS = 4_000L
+    private const val PROBE_IO_TIMEOUT_MS = 8_000L
 
     /** Native setDataSource + multi-seek keyframe grabs. Waiter abandons; no cross-thread release. */
-    private const val DECODE_TIMEOUT_MS = 2_500L
+    private const val DECODE_TIMEOUT_MS = 5_000L
 
     /** Large-file ranged open + multi-seek (I/O + decode share one waiter). */
-    private const val RANGED_NETWORK_TIMEOUT_MS = 5_000L
+    private const val RANGED_NETWORK_TIMEOUT_MS = 10_000L
 
     /** Leave room for release after last seek inside the decode budget. */
     private const val SEEK_BUDGET_MS = 2_400L
@@ -169,8 +171,9 @@ object VideoThumbnail {
     private const val BLACK_LUMA = 24
     private const val MIN_VISIBLE_SAMPLES = SAMPLE_GRID * SAMPLE_GRID * 15 / 100
 
-    private val extractSemaphore = Semaphore(MAX_CONCURRENT_EXTRACTIONS)
-    private val probeSemaphore = Semaphore(MAX_CONCURRENT_PROBES)
+    /** Follows the Advanced network concurrency settings — see [ThumbConcurrency]. */
+    private val extractSemaphore = SettingSlots { ThumbConcurrency.videoDecode() }
+    private val probeSemaphore = SettingSlots { ThumbConcurrency.videoProbe() }
     private val pathLocks = ConcurrentHashMap<String, Mutex>()
     private val leftoverMarkersCleared = AtomicBoolean(false)
     private val poolLock = Any()
@@ -188,8 +191,8 @@ object VideoThumbnail {
     private var probePool: ThreadPoolExecutor = newProbePool()
 
     private fun newDecodePool() = ThreadPoolExecutor(
-        MAX_CONCURRENT_EXTRACTIONS,
-        MAX_DECODE_THREADS,
+        DECODE_POOL_THREADS,
+        DECODE_POOL_THREADS,
         30L,
         TimeUnit.SECONDS,
         SynchronousQueue(),
@@ -198,8 +201,8 @@ object VideoThumbnail {
     ).also { it.allowCoreThreadTimeOut(true) }
 
     private fun newProbePool() = ThreadPoolExecutor(
-        MAX_CONCURRENT_PROBES,
-        MAX_PROBE_THREADS,
+        PROBE_POOL_THREADS,
+        PROBE_POOL_THREADS,
         30L,
         TimeUnit.SECONDS,
         SynchronousQueue(),
@@ -384,7 +387,7 @@ object VideoThumbnail {
         is VideoThumbnailSource.Local -> {
             val zipMember = ZipPaths.parse(source.path)
             if (zipMember != null) {
-                probeSemaphore.withPermit {
+                probeSemaphore.gate().withPermit {
                     val (zipAbs, member) = zipMember
                     val zip = openLocalArchiveByteSource(zipAbs.toPath()) ?: return@withPermit null
                     val memberSrc = ZipMemberByteSource.open(
@@ -400,7 +403,7 @@ object VideoThumbnail {
                     extractNetworkFrame(memberSrc, source, persistTarget)
                 }
             } else {
-                extractSemaphore.withPermit {
+                extractSemaphore.gate().withPermit {
                     extractLocalFrame(source, persistTarget)
                 }
             }
@@ -408,7 +411,7 @@ object VideoThumbnail {
         is VideoThumbnailSource.Smb -> {
             if (networkPaused.get()) return null
             val smb = SmbRepository.load(source.sourceId) ?: error("SMB source missing")
-            probeSemaphore.withPermit {
+            probeSemaphore.gate().withPermit {
                 if (networkPaused.get()) return@withPermit null
                 SmbCache.withBrowseThumbFetchSlot {
                     val raw = SmbArchiveByteSource(
@@ -426,7 +429,7 @@ object VideoThumbnail {
         is VideoThumbnailSource.WebDav -> {
             if (networkPaused.get()) return null
             val webDav = WebDavRepository.load(source.sourceId) ?: error("WebDAV source missing")
-            probeSemaphore.withPermit {
+            probeSemaphore.gate().withPermit {
                 if (networkPaused.get()) return@withPermit null
                 WebDavCache.withBrowseThumbFetchSlot {
                     val raw = WebDavArchiveByteSource(
@@ -455,12 +458,12 @@ object VideoThumbnail {
         val sizeHint = source.knownSizeBytes.takeIf { it > 0L } ?: raw.size
         val ts = isMpegTsVideoName(source.fileName) || !raw.isRandomAccess
         return if (!ts && sizeHint > LARGE_FILE_BYTES) {
-            extractSemaphore.withPermit {
+            extractSemaphore.gate().withPermit {
                 decodeRangedNetwork(raw, source, persistTarget, sizeHint)
             }
         } else {
             val snapshot = fetchProbeSnapshot(raw, source) ?: return null
-            extractSemaphore.withPermit { decodeSnapshot(snapshot, source, persistTarget) }
+            extractSemaphore.gate().withPermit { decodeSnapshot(snapshot, source, persistTarget) }
         }
     }
 
@@ -865,7 +868,7 @@ object VideoThumbnail {
             decodePool.execute(task)
         } catch (_: RejectedExecutionException) {
             logcat("VideoThumb") {
-                "decode pool full ($label) active=${decodePool.activeCount}/$MAX_DECODE_THREADS"
+                "decode pool full ($label) active=${decodePool.activeCount}/$DECODE_POOL_THREADS"
             }
             runCatching { retriever.release() }
             runCatching { cleanup() }

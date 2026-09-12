@@ -4,6 +4,8 @@ import android.os.Looper
 import com.ehviewer.core.files.mkdirs
 import com.hippo.ehviewer.image.hdr.HdrConvertCache
 import com.hippo.ehviewer.library.OriginDiskCache
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.util.FileUtils
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -13,7 +15,6 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -54,11 +55,15 @@ object SmbCache {
      */
     private const val THUMB_FORMAT_VERSION = 3
 
-    /** Cap concurrent full-file SMB fetches for thumb generation (first paint). */
-    private val thumbFetchSlots = Semaphore(3)
+    /**
+     * Concurrent full-file SMB fetches for thumb generation. Follows Advanced → SMB
+     * concurrent connections × ops per session ([ThumbConcurrency.smb]); the real per-host
+     * bound stays in [com.hippo.ehviewer.smb.SmbGateway].
+     */
+    private val thumbFetchSlots = SettingSlots { ThumbConcurrency.smb() }
 
     /** Share folder/gallery thumbnail network capacity with video prefix fetches. */
-    suspend fun <T> withBrowseThumbFetchSlot(block: suspend () -> T): T = thumbFetchSlots.withPermit { block() }
+    suspend fun <T> withBrowseThumbFetchSlot(block: suspend () -> T): T = thumbFetchSlots.gate().withPermit { block() }
 
     /**
      * Cache roots as pure path math from [ApplicationInfo.dataDir] (string field — no disk).
@@ -235,7 +240,7 @@ object SmbCache {
         val mutex = pathLocks.getOrPut(key) { Mutex() }
         mutex.withLock {
             cachedThumbIfPresent(sourceId, remoteRelativeFile)?.let { return@withContext it }
-            thumbFetchSlots.withPermit {
+            thumbFetchSlots.gate().withPermit {
                 cachedThumbIfPresent(sourceId, remoteRelativeFile)?.let { return@withContext it }
                 ensureRootDirs()
                 File(destPath.parent!!.toString()).mkdirs()
