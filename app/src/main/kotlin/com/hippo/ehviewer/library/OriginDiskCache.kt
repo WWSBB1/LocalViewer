@@ -32,7 +32,7 @@ import splitties.init.appCtx
  *    on access). Never protects “complete” archive caches. **Never deletes
  *    `index.json`** under extract dirs.
  * 2. **Thumbs** (SMB/WebDAV/archive/video covers): long edge [THUMB_EDGE], fixed
- *    [THUMB_BUDGET_BYTES] — separate from origin budget and settings.
+ *    [ORIGIN_BUDGET_BYTES] — separate from origin budget and settings.
  */
 object OriginDiskCache {
     /** Generated browse/cover thumb long edge (px). */
@@ -82,6 +82,43 @@ object OriginDiskCache {
         val jpg = jpegSibling(canonicalWebp)
         if (jpg.path == canonicalWebp.path) return null
         return jpg.takeIf { it.isFile && it.length() > 0L }
+    }
+
+    /**
+     * Calculate total bytes used by all thumb cache directories.
+     * Includes: smb_thumb_cache, webdav_thumb_cache, archive_thumb, video_thumb_cache.
+     * Call from IO thread (disk probe).
+     */
+    fun thumbCacheSizeBytes(): Long {
+        var total = 0L
+        for (name in listOf("smb_thumb_cache", "webdav_thumb_cache", "archive_thumb", "video_thumb_cache")) {
+            val dir = cacheDir(name)
+            if (!dir.isDirectory) continue
+            dir.listFiles()?.forEach { f ->
+                if (f.isFile && f.length() > 0L) {
+                    val n = f.name
+                    // Skip temps and failure markers (same filter as trimThumbs)
+                    if (!n.contains(".tmp.") && !n.contains(".jpg.") && !n.contains(".webp.") &&
+                        !n.contains(".uhdr.") && !n.endsWith(".tmp") && !n.endsWith(".failed")
+                    ) {
+                        total += f.length()
+                    }
+                }
+            }
+        }
+        return total
+    }
+
+    /**
+     * Format bytes to human-readable string (e.g. "128 MB", "1.2 GB").
+     */
+    fun formatCacheSize(bytes: Long): String {
+        return when {
+            bytes < 1024L -> "$bytes B"
+            bytes < 1024L * 1024 -> "${bytes / 1024} KB"
+            bytes < 1024L * 1024 * 1024 -> "${"%.1f".format(bytes / (1024.0 * 1024))} MB"
+            else -> "${"%.2f".format(bytes / (1024.0 * 1024 * 1024))} GB"
+        }
     }
 
     private val json = Json {

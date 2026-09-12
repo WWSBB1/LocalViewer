@@ -47,6 +47,7 @@ import com.hippo.ehviewer.EhDB
 import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.asMutableState
 import com.hippo.ehviewer.ktor.isCronetAvailable
+import com.hippo.ehviewer.library.OriginDiskCache
 import com.hippo.ehviewer.ui.Screen
 import com.hippo.ehviewer.ui.main.NavigationIcon
 import com.hippo.ehviewer.ui.screen.adaptiveTopAppBarColors
@@ -221,9 +222,16 @@ fun AnimatedVisibilityScope.AdvancedScreen(navigator: DestinationsNavigator) = S
                 summary = stringResource(id = R.string.settings_smb_async_transport_summary),
                 state = Settings.smbAsyncTransport.asMutableState(),
             )
+            var thumbCacheSize by remember { mutableStateOf("...") }
+            LaunchedEffect(Unit) {
+                withIOContext {
+                    val bytes = OriginDiskCache.thumbCacheSizeBytes()
+                    thumbCacheSize = OriginDiskCache.formatCacheSize(bytes)
+                }
+            }
             SimpleMenuPreferenceInt(
                 title = stringResource(id = R.string.settings_advanced_read_cache_size),
-                summary = stringResource(id = R.string.settings_advanced_read_cache_size_summary),
+                summary = stringResource(id = R.string.settings_advanced_read_cache_size_summary, thumbCacheSize),
                 entry = com.hippo.ehviewer.R.array.read_cache_size_entries,
                 entryValueRes = com.hippo.ehviewer.R.array.read_cache_size_entry_values,
                 state = Settings.readCacheSize.asMutableState(),
