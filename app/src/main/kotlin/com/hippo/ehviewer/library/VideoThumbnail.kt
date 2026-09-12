@@ -389,18 +389,23 @@ object VideoThumbnail {
             if (zipMember != null) {
                 probeSemaphore.gate().withPermit {
                     val (zipAbs, member) = zipMember
-                    val zip = openLocalArchiveByteSource(zipAbs.toPath()) ?: return@withPermit null
-                    val memberSrc = ZipMemberByteSource.open(
-                        zip,
-                        member,
-                        ownsZip = true,
-                        prefixCap = ZipMemberByteSource.DEFLATE_PREFIX_CAP,
+                    extractNetworkFrame(
+                        openSource = openSource@{
+                            val zip = openLocalArchiveByteSource(zipAbs.toPath()) ?: return@openSource null
+                            ZipMemberByteSource.open(
+                                zip,
+                                member,
+                                ownsZip = true,
+                                prefixCap = ZipMemberByteSource.DEFLATE_PREFIX_CAP,
+                            )
+                                ?: run {
+                                    runCatching { zip.close() }
+                                    null
+                                }
+                        },
+                        source = source,
+                        persistTarget = persistTarget,
                     )
-                        ?: run {
-                            runCatching { zip.close() }
-                            return@withPermit null
-                        }
-                    extractNetworkFrame(memberSrc, source, persistTarget)
                 }
             } else {
                 extractSemaphore.gate().withPermit {
@@ -414,15 +419,20 @@ object VideoThumbnail {
             probeSemaphore.gate().withPermit {
                 if (networkPaused.get()) return@withPermit null
                 SmbCache.withBrowseThumbFetchSlot {
-                    val raw = SmbArchiveByteSource(
-                        source = smb,
-                        password = SmbPasswordStore.get(source.sourceId),
-                        remoteRelativeFile = source.remoteRelativeFile,
-                        pipeline = false,
-                        readahead = false,
-                        yieldable = true,
+                    extractNetworkFrame(
+                        openSource = {
+                            SmbArchiveByteSource(
+                                source = smb,
+                                password = SmbPasswordStore.get(source.sourceId),
+                                remoteRelativeFile = source.remoteRelativeFile,
+                                pipeline = false,
+                                readahead = false,
+                                yieldable = true,
+                            )
+                        },
+                        source = source,
+                        persistTarget = persistTarget,
                     )
-                    extractNetworkFrame(raw, source, persistTarget)
                 }
             }
         }
@@ -432,14 +442,19 @@ object VideoThumbnail {
             probeSemaphore.gate().withPermit {
                 if (networkPaused.get()) return@withPermit null
                 WebDavCache.withBrowseThumbFetchSlot {
-                    val raw = WebDavArchiveByteSource(
-                        source = webDav,
-                        password = WebDavPasswordStore.get(source.sourceId),
-                        remoteRelativeFile = source.remoteRelativeFile,
-                        pipeline = false,
-                        readahead = false,
+                    extractNetworkFrame(
+                        openSource = {
+                            WebDavArchiveByteSource(
+                                source = webDav,
+                                password = WebDavPasswordStore.get(source.sourceId),
+                                remoteRelativeFile = source.remoteRelativeFile,
+                                pipeline = false,
+                                readahead = false,
+                            )
+                        },
+                        source = source,
+                        persistTarget = persistTarget,
                     )
-                    extractNetworkFrame(raw, source, persistTarget)
                 }
             }
         }
@@ -447,23 +462,32 @@ object VideoThumbnail {
 
     /**
      * Small / TS: offline head(+tail) snapshot then decode.
-     * Large (>100 MiB) non-TS: ranged RAM [CachingRangeMediaDataSource] so **30s**
-     * keyframe seek can hit real bytes (not sparse holes).
+     * Large (>100 MiB) non-TS: snapshot first (abandon-safe), ranged seek only as fallback.
      */
     private suspend fun extractNetworkFrame(
-        raw: ArchiveByteSource,
+        openSource: () -> ArchiveByteSource?,
         source: VideoThumbnailSource,
         persistTarget: File,
     ): Bitmap? {
-        val sizeHint = source.knownSizeBytes.takeIf { it > 0L } ?: raw.size
-        val ts = isMpegTsVideoName(source.fileName) || !raw.isRandomAccess
-        return if (!ts && sizeHint > LARGE_FILE_BYTES) {
-            extractSemaphore.gate().withPermit {
-                decodeRangedNetwork(raw, source, persistTarget, sizeHint)
-            }
-        } else {
-            val snapshot = fetchProbeSnapshot(raw, source) ?: return null
-            extractSemaphore.gate().withPermit { decodeSnapshot(snapshot, source, persistTarget) }
+        val first = openSource() ?: return null
+        val sizeHint = source.knownSizeBytes.takeIf { it > 0L }
+            ?: runCatching { first.size }.getOrDefault(0L)
+        val ts = isMpegTsVideoName(source.fileName) || !first.isRandomAccess
+
+        if (ts || sizeHint <= LARGE_FILE_BYTES) {
+            val snapshot = fetchProbeSnapshot(first, source) ?: return null
+            return extractSemaphore.gate().withPermit { decodeSnapshot(snapshot, source, persistTarget) }
+        }
+
+        // Probe failure/timeout means the transport is unhealthy — do not stack a ranged
+        // decode (more range reads) on top of it.
+        val snapshot = fetchProbeSnapshot(first, source) ?: return null
+        val early = extractSemaphore.gate().withPermit { decodeSnapshot(snapshot, source, persistTarget) }
+        if (early != null) return early
+
+        val ranged = openSource() ?: return null
+        return extractSemaphore.gate().withPermit {
+            decodeRangedNetwork(ranged, source, persistTarget, sizeHint)
         }
     }
 
