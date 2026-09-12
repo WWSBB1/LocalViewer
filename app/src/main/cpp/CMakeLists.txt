@@ -24,7 +24,12 @@ endif ()
 # meson (libavif LocalDav1d) shells out to `ninja`; ensure SDK ninja is on PATH.
 if (CMAKE_MAKE_PROGRAM AND CMAKE_MAKE_PROGRAM MATCHES "ninja")
     get_filename_component(_eh_ninja_dir "${CMAKE_MAKE_PROGRAM}" DIRECTORY)
-    set(ENV{PATH} "${_eh_ninja_dir}:$ENV{PATH}")
+    # Host PATH separator: ';' on Windows, ':' elsewhere.
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+        set(ENV{PATH} "${_eh_ninja_dir};$ENV{PATH}")
+    else ()
+        set(ENV{PATH} "${_eh_ninja_dir}:$ENV{PATH}")
+    endif ()
 endif ()
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -66,8 +71,21 @@ include_directories(${liblzma_SOURCE_DIR}/src/liblzma/api)
 # Build GNUTLS libnettle
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_VERSION "${ANDROID_NDK_MAJOR}.${ANDROID_NDK_MINOR}.${ANDROID_NDK_BUILD}")
-    set(TOOLCHAIN "$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin")
     set(WSL wsl)
+    # nettle is configured/built inside WSL, which does not inherit the Windows
+    # environment — '$ANDROID_HOME' is empty over there, so the NDK has to be
+    # spelled out as a /mnt/<drive> path that WSL can actually resolve.
+    if (ANDROID_NDK)
+        set(_eh_ndk_path "${ANDROID_NDK}")
+    else ()
+        set(_eh_ndk_path "$ENV{ANDROID_HOME}/ndk/${NDK_VERSION}")
+    endif ()
+    string(REPLACE "\\" "/" _eh_ndk_path "${_eh_ndk_path}")
+    if (_eh_ndk_path MATCHES "^([A-Za-z]):/(.*)$")
+        string(TOLOWER "${CMAKE_MATCH_1}" _eh_ndk_drive)
+        set(_eh_ndk_path "/mnt/${_eh_ndk_drive}/${CMAKE_MATCH_2}")
+    endif ()
+    set(TOOLCHAIN "${_eh_ndk_path}/toolchains/llvm/prebuilt/linux-x86_64/bin")
 else ()
     set(TOOLCHAIN "${ANDROID_TOOLCHAIN_ROOT}/bin")
 endif ()
@@ -305,11 +323,49 @@ if (EHVIEWER_HDR_CODECS)
         endif ()
     endif ()
 
+    # dav1d's own package/crossfiles/*-android.meson name the compilers the
+    # way NDK ships them on Linux/macOS: extensionless `aarch64-linux-android21-clang`.
+    # The Windows NDK only provides `.cmd` / `.sh` wrappers for those, and meson
+    # execs the compiler directly (CreateProcess cannot run a .cmd), so the
+    # configure step dies with "Unknown compiler(s)".
+    # clang derives its target triple from argv[0], so clang.exe / clang++.exe
+    # hard-linked under the triple name is a drop-in replacement — and it stays
+    # next to the real clang, keeping the ../sysroot and ../lib/clang lookups intact.
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+        set(_eh_android_triple "")
+        if (ANDROID_ABI STREQUAL "arm64-v8a")
+            set(_eh_android_triple "aarch64-linux-android21")
+        elseif (ANDROID_ABI STREQUAL "armeabi-v7a")
+            set(_eh_android_triple "armv7a-linux-androideabi21")
+        elseif (ANDROID_ABI STREQUAL "x86_64")
+            set(_eh_android_triple "x86_64-linux-android21")
+        elseif (ANDROID_ABI STREQUAL "x86")
+            set(_eh_android_triple "i686-linux-android19")
+        endif ()
+        if (_eh_android_triple)
+            foreach (_eh_lang clang clang++)
+                set(_eh_compiler_wrapper "${ANDROID_TOOLCHAIN_ROOT}/bin/${_eh_android_triple}-${_eh_lang}.exe")
+                if (NOT EXISTS "${_eh_compiler_wrapper}")
+                    message(STATUS "Creating meson compiler wrapper ${_eh_compiler_wrapper}")
+                    file(CREATE_LINK "${ANDROID_TOOLCHAIN_ROOT}/bin/${_eh_lang}.exe" "${_eh_compiler_wrapper}"
+                            RESULT _eh_link_result COPY_ON_ERROR)
+                    if (NOT _eh_link_result STREQUAL "0")
+                        message(WARNING "failed to create ${_eh_compiler_wrapper}: ${_eh_link_result}")
+                    endif ()
+                endif ()
+            endforeach ()
+        endif ()
+    endif ()
+
+    set(LIBAVIF_PATCH
+            ${CMAKE_CURRENT_LIST_DIR}/libavif-0001-LocalDav1d-use-CMAKE_HOST_WIN32.patch
+    )
     FetchContent_Declare(
             libavif
             GIT_REPOSITORY https://github.com/AOMediaCodec/libavif.git
             GIT_TAG v1.3.0
             GIT_SHALLOW 1
+            PATCH_COMMAND git apply --check -R ${LIBAVIF_PATCH} || git apply ${LIBAVIF_PATCH}
     )
     FetchContent_MakeAvailable(libavif)
     if (NOT TARGET dav1d::dav1d AND NOT TARGET dav1d)
