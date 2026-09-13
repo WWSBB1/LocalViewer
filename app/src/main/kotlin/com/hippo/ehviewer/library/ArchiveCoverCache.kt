@@ -113,8 +113,9 @@ object ArchiveCoverCache {
     /** Paths known present on disk — main-thread [isCached] must not touch the filesystem. */
     private val knownPresent = ConcurrentHashMap.newKeySet<String>()
 
+    /** Durable: `no_backup/thumb_cache/` — Android cache GC cannot reclaim it. */
     private val thumbRoot: Path by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        File(appCtx.applicationInfo.dataDir, "cache/archive_thumb").toOkioPath()
+        OriginDiskCache.thumbDir(OriginDiskCache.ARCHIVE_THUMB_STORE)
     }
 
     fun thumbPathFor(archivePath: String, mtimeMs: Long = 0L, sizeBytes: Long = 0L): Path {
@@ -249,7 +250,20 @@ object ArchiveCoverCache {
     private fun existingCover(dest: Path): Path? {
         val hit = OriginDiskCache.existingThumb(dest) ?: return null
         markPresent(hit)
+        touch(hit)
         return hit
+    }
+
+    /**
+     * Bump mtime on a cover hit so [OriginDiskCache]'s LRU sees the covers the user just
+     * viewed as warm. Without it archive covers kept their creation time, stayed the
+     * coldest entries of the shared thumb pool, and were evicted first on every trim.
+     * No-op on main (StrictMode). Mirrors [SmbCache.touch].
+     */
+    fun touch(path: Path) {
+        if (Looper.getMainLooper().isCurrentThread) return
+        val f = File(path.toString())
+        if (f.isFile) f.setLastModified(System.currentTimeMillis())
     }
 
     fun markPresent(path: Path) {
@@ -266,7 +280,7 @@ object ArchiveCoverCache {
 
     /**
      * Whether a stored cover path is still openable.
-     * Absolute filesystem paths (e.g. `…/cache/archive_thumb/…jpg`) are probed on disk
+     * Absolute filesystem paths (e.g. `…/no_backup/thumb_cache/archive_thumb/…jpg`) are probed on disk
      * and [knownPresent] is updated. Non-absolute schemes (`content:`, `mediastore:`) are
      * trusted here — [com.hippo.ehviewer.coil.CoverPathFetcher] resolves them later.
      */

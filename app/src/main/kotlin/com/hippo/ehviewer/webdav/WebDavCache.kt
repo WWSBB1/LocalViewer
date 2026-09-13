@@ -25,7 +25,8 @@ import splitties.init.appCtx
 /**
  * Disk cache for WebDAV (mirrors [com.hippo.ehviewer.smb.SmbCache] split).
  * - Pages: `webdav_cache/` full files — unified origin budget ([OriginDiskCache])
- * - Thumbs: `webdav_thumb_cache/` small WebP (leftover JPEG until LRU) — shared thumb budget
+ * - Thumbs: `no_backup/thumb_cache/webdav_thumb_cache/` small WebP (leftover JPEG until LRU)
+ *   — shared thumb budget
  */
 object WebDavCache {
     enum class Kind { Page, Thumb }
@@ -48,8 +49,9 @@ object WebDavCache {
     private val pageRoot: Path by lazy(LazyThreadSafetyMode.PUBLICATION) {
         File(appCtx.applicationInfo.dataDir, "cache/webdav_cache").toOkioPath()
     }
+    /** Durable: `no_backup/thumb_cache/` — Android cache GC cannot reclaim it. */
     private val thumbRoot: Path by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        File(appCtx.applicationInfo.dataDir, "cache/webdav_thumb_cache").toOkioPath()
+        OriginDiskCache.thumbDir(OriginDiskCache.WEBDAV_THUMB_STORE)
     }
 
     private val pathLocks = ConcurrentHashMap<String, Mutex>()

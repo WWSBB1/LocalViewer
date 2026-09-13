@@ -1,5 +1,6 @@
 package com.hippo.ehviewer.library
 
+import com.ehviewer.core.util.logcat
 import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.smb.SmbCache
 import com.hippo.ehviewer.webdav.WebDavCache
@@ -49,6 +50,68 @@ object OriginDiskCache {
     /** Shared budget for all on-disk thumb stores (not Coil’s separate 256 MiB). */
     const val ORIGIN_BUDGET_BYTES = 512L * 1024L * 1024L
 
+    /** Thumb store names — one budget and one LRU across all of them. */
+    const val SMB_THUMB_STORE = "smb_thumb_cache"
+    const val WEBDAV_THUMB_STORE = "webdav_thumb_cache"
+    const val ARCHIVE_THUMB_STORE = "archive_thumb"
+    const val VIDEO_THUMB_STORE = "video_thumb_cache"
+
+    private val THUMB_STORES = listOf(SMB_THUMB_STORE, WEBDAV_THUMB_STORE, ARCHIVE_THUMB_STORE, VIDEO_THUMB_STORE)
+
+    /**
+     * Durable thumb store dir / file under `no_backup/thumb_cache/`.
+     *
+     * Deliberately **not** under `cache/`: that directory is Android's reclaimable cache
+     * (`cacheDir`), so the system cache GC — or any "clean junk" tool — may empty it at any
+     * moment, which used to wipe whole thumb stores while the pool was far below
+     * [Settings.readCacheSize]. `no_backup/` is app-private data, so the **only** thing that
+     * can delete a thumb is the cap-driven LRU in [trimThumbs] — the same treatment
+     * [NetworkFolderIndexCache] already got.
+     *
+     * Pure path math from the app data dir string: no Context dir lookup / mkdirs on
+     * resolve (browse thumbs build these paths during composition).
+     */
+    fun thumbDir(name: String): Path = thumbDirFile(name).toOkioPath()
+
+    fun thumbDirFile(name: String): File = File(dataDir, "no_backup/thumb_cache/$name")
+
+    /** Pre-move location: Android-reclaimable `cache/`. */
+    private fun legacyThumbDir(name: String): File = File(dataDir, "cache/$name")
+
+    /**
+     * One-time move of legacy `cache/<store>` dirs into [thumbDir]. Idempotent; both live
+     * under the app data dir, so this is a same-filesystem rename — file names and mtimes
+     * (= LRU order) survive, so cached thumbs and every logical cover key keep resolving.
+     * Call from startup IO.
+     */
+    fun migrateLegacyThumbDirs() {
+        for (name in THUMB_STORES) {
+            val legacy = legacyThumbDir(name)
+            if (!legacy.isDirectory) continue
+            val dest = thumbDirFile(name)
+            // Fast path: nothing recreated the store yet → move the whole dir at once.
+            if (!dest.exists()) {
+                dest.parentFile?.mkdirs()
+                if (runCatching { legacy.renameTo(dest) }.getOrDefault(false)) {
+                    logcat("CacheTrim") { "thumb store $name: moved legacy dir" }
+                    continue
+                }
+            }
+            // A write already recreated the store (or the rename failed): move over every
+            // file we still miss, so an in-flight browse cannot strand the old thumbs.
+            var moved = 0
+            var failed = 0
+            legacy.listFiles()?.forEach { f ->
+                if (!f.isFile) return@forEach
+                val target = File(dest, f.name)
+                if (target.isFile && target.length() > 0L) return@forEach
+                dest.mkdirs()
+                if (runCatching { f.renameTo(target) }.getOrDefault(false)) moved++ else failed++
+            }
+            logcat("CacheTrim") { "thumb store $name: merged legacy files=$moved failed=$failed" }
+        }
+    }
+
     fun thumbFileName(hash: String): String = "$hash.$THUMB_EXT"
 
     /** Same-hash leftover JPEG next to a canonical `.webp` thumb path. */
@@ -91,19 +154,12 @@ object OriginDiskCache {
      */
     fun thumbCacheSizeBytes(): Long {
         var total = 0L
-        for (name in listOf("smb_thumb_cache", "webdav_thumb_cache", "archive_thumb", "video_thumb_cache")) {
-            val dir = cacheDir(name)
+        for (name in THUMB_STORES) {
+            val dir = thumbDirFile(name)
             if (!dir.isDirectory) continue
             dir.listFiles()?.forEach { f ->
-                if (f.isFile && f.length() > 0L) {
-                    val n = f.name
-                    // Skip temps and failure markers (same filter as trimThumbs)
-                    if (!n.contains(".tmp.") && !n.contains(".jpg.") && !n.contains(".webp.") &&
-                        !n.contains(".uhdr.") && !n.endsWith(".tmp") && !n.endsWith(".failed")
-                    ) {
-                        total += f.length()
-                    }
-                }
+                // Same filter [trimThumbs] uses, so “used” matches what the cap governs.
+                if (isThumbPayload(f)) total += f.length()
             }
         }
         return total
@@ -320,15 +376,17 @@ object OriginDiskCache {
 
     // ── Thumbs (separate fixed budget) ────────────────────────────────────
 
-    private data class ThumbEntry(val file: File, val mtime: Long, val size: Long)
+    private data class ThumbEntry(
+        val store: String,
+        val file: File,
+        val mtime: Long,
+        val size: Long,
+    )
 
     private fun trimThumbs() {
         val thumbBudgetBytes = Settings.readCacheSize.value.coerceIn(320, 5120).toLong() * 1024L * 1024L
         val candidates = ArrayList<ThumbEntry>(2048)
-        collectThumbFiles(cacheDir("smb_thumb_cache"), candidates)
-        collectThumbFiles(cacheDir("webdav_thumb_cache"), candidates)
-        collectThumbFiles(cacheDir("archive_thumb"), candidates)
-        collectThumbFiles(cacheDir("video_thumb_cache"), candidates)
+        for (name in THUMB_STORES) collectThumbFiles(name, candidates)
 
         var total = candidates.sumOf { it.size }
         if (total <= thumbBudgetBytes) return
@@ -338,37 +396,43 @@ object OriginDiskCache {
             if (total <= thumbBudgetBytes) break
             if (e.file.delete()) {
                 total -= e.size
-                onThumbDeleted(e.file)
+                onThumbDeleted(e.store, e.file)
             }
         }
     }
 
-    private fun collectThumbFiles(dir: File, out: MutableList<ThumbEntry>) {
+    /**
+     * Cache payload only: a stored thumb is `<hash>.webp` or its legacy `.jpg` sibling.
+     * Everything else parked in these dirs is not a cached thumb — `*.tmp.*` write
+     * intermediate, `*.failed` marker, and the 2–8 MiB `mmr-<nano>.bin` MMR snapshot
+     * [VideoThumbnail] keeps in `video_thumb_cache` while decoding.
+     *
+     * Counting those inflated the pool, so [trimThumbs] evicted real thumbs although the
+     * thumbs themselves were still under the cap (and the settings “used” size was wrong).
+     */
+    private fun isThumbPayload(f: File): Boolean {
+        if (!f.isFile || f.length() <= 0L) return false
+        val name = f.name
+        return name.endsWith(".$THUMB_EXT") || name.endsWith(".$THUMB_LEGACY_EXT")
+    }
+
+    private fun collectThumbFiles(store: String, out: MutableList<ThumbEntry>) {
+        val dir = thumbDirFile(store)
         if (!dir.isDirectory) return
         val files = dir.listFiles() ?: return
         for (f in files) {
-            if (!f.isFile) continue
-            val name = f.name
-            // Skip temps and video-thumb failure markers (*.failed).
-            if (name.contains(".tmp.") || name.contains(".jpg.") || name.contains(".webp.") ||
-                name.contains(".uhdr.") || name.endsWith(".tmp") || name.endsWith(".failed")
-            ) {
-                continue
-            }
-            val size = f.length()
-            if (size <= 0L) continue
-            out += ThumbEntry(f, f.lastModified(), size)
+            if (!isThumbPayload(f)) continue
+            out += ThumbEntry(store, f, f.lastModified(), f.length())
         }
     }
 
-    private fun onThumbDeleted(file: File) {
-        val path = file.absolutePath
+    private fun onThumbDeleted(store: String, file: File) {
         val okio = file.toOkioPath()
-        when {
-            path.contains("/cache/smb_thumb_cache/") -> SmbCache.markAbsent(okio)
-            path.contains("/cache/webdav_thumb_cache/") -> WebDavCache.markAbsent(okio)
-            path.contains("/cache/archive_thumb/") -> ArchiveCoverCache.markAbsent(okio)
-            // video_thumb_cache: no in-memory hit map to clear
+        when (store) {
+            SMB_THUMB_STORE -> SmbCache.markAbsent(okio)
+            WEBDAV_THUMB_STORE -> WebDavCache.markAbsent(okio)
+            ARCHIVE_THUMB_STORE -> ArchiveCoverCache.markAbsent(okio)
+            // VIDEO_THUMB_STORE: no in-memory hit map to clear
         }
     }
 }

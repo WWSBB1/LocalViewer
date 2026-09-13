@@ -3,6 +3,7 @@ package com.hippo.ehviewer.library
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.os.Looper
 import com.ehviewer.core.files.openFileDescriptor
 import com.ehviewer.core.util.logcat
 import com.ehviewer.core.util.withIOContext
@@ -32,7 +33,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import okio.Path.Companion.toPath
-import splitties.init.appCtx
 
 sealed interface VideoThumbnailSource {
     /**
@@ -110,7 +110,7 @@ sealed interface VideoThumbnailSource {
  * - Probe I/O on [probePool]; timeout/cancel closes [ArchiveByteSource] (safe: not under MMR).
  * - [onAppBackgrounded] rejects new network thumbs so ON_STOP cannot race decode.
  *
- * Disk: `cache/video_thumb_cache/` under [OriginDiskCache.THUMB_BUDGET_BYTES].
+ * Disk: `no_backup/thumb_cache/video_thumb_cache/` under [com.hippo.ehviewer.Settings.readCacheSize].
  */
 object VideoThumbnail {
     private val EDGE_PX: Int get() = OriginDiskCache.THUMB_EDGE
@@ -210,7 +210,7 @@ object VideoThumbnail {
         ThreadPoolExecutor.AbortPolicy(),
     ).also { it.allowCoreThreadTimeOut(true) }
 
-    fun cacheDirectory(): File = File(appCtx.applicationInfo.dataDir, "cache/video_thumb_cache").apply { mkdirs() }
+    fun cacheDirectory(): File = OriginDiskCache.thumbDirFile(OriginDiskCache.VIDEO_THUMB_STORE).apply { mkdirs() }
 
     /**
      * Call when the visible browse folder changes (SMB/WebDAV/local path).
@@ -264,7 +264,7 @@ object VideoThumbnail {
      * Does not touch cached thumbs. Safe if the directory is missing.
      */
     fun clearFailureMarkers() {
-        val directory = File(appCtx.applicationInfo.dataDir, "cache/video_thumb_cache")
+        val directory = OriginDiskCache.thumbDirFile(OriginDiskCache.VIDEO_THUMB_STORE)
         if (!directory.isDirectory) return
         directory.listFiles()?.forEach { file ->
             if (file.isFile && file.name.endsWith(".failed")) {
@@ -279,9 +279,20 @@ object VideoThumbnail {
         val directory = cacheDirectory()
         val key = cacheKey(source)
         val webp = File(directory, "$key.${OriginDiskCache.THUMB_EXT}")
-        if (isCachedThumb(webp)) return webp
+        if (isCachedThumb(webp)) return touch(webp)
         val jpg = File(directory, "$key.${OriginDiskCache.THUMB_LEGACY_EXT}")
-        return jpg.takeIf(::isCachedThumb)
+        return jpg.takeIf(::isCachedThumb)?.let(::touch)
+    }
+
+    /**
+     * Bump mtime on a hit so [OriginDiskCache]'s LRU sees the covers the user just viewed
+     * as warm — video thumbs otherwise kept their creation time and were evicted first.
+     * No-op on main (StrictMode). Mirrors [com.hippo.ehviewer.smb.SmbCache.touch].
+     */
+    private fun touch(file: File): File {
+        if (Looper.getMainLooper().isCurrentThread) return file
+        if (file.isFile) file.setLastModified(System.currentTimeMillis())
+        return file
     }
 
     @Suppress("UNUSED_PARAMETER")

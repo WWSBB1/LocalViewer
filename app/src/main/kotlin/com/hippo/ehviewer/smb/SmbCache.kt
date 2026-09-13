@@ -28,7 +28,7 @@ import splitties.init.appCtx
  * - **Pages** (`smb_cache/`): full remote files for the reader. Shares the unified
  *   origin budget in [com.hippo.ehviewer.library.OriginDiskCache] (Advanced image
  *   disk cache size). Oldest files first; archives are not protected.
- * - **Browse thumbs** (`smb_thumb_cache/`): small WebP (long edge
+ * - **Browse thumbs** (`no_backup/thumb_cache/smb_thumb_cache/`): small WebP (long edge
  *   [THUMB_DISK_EDGE]); leftover JPEG files stay until LRU. Shared
  *   [OriginDiskCache.THUMB_BUDGET_BYTES] with other thumb stores — separate from origin budget.
  */
@@ -75,8 +75,9 @@ object SmbCache {
         File(appCtx.applicationInfo.dataDir, "cache/smb_cache").toOkioPath()
     }
 
+    /** Durable: `no_backup/thumb_cache/` — Android cache GC cannot reclaim it. */
     private val thumbRoot: Path by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        File(appCtx.applicationInfo.dataDir, "cache/smb_thumb_cache").toOkioPath()
+        OriginDiskCache.thumbDir(OriginDiskCache.SMB_THUMB_STORE)
     }
 
     /** One lock per cache file so concurrent callers share one download/encode. */
