@@ -2023,11 +2023,14 @@ object SmbGateway {
         }
         // RAM-only until deep succeeds — disk-saving Empty shells would make slim
         // quick-scan treat the folder as unchanged and never upgrade.
+        // childrenFresh: these rows ARE this session's live child list, so browse may
+        // fetch thumbs now; only the deferred peeks are still missing.
         BrowseSession.putSmbListing(
             source.id,
             relativeDir,
             shallowMerged,
             sessionCurrent = false,
+            childrenFresh = true,
         )
         logcat("FolderIndex") {
             "SMB shallow list source=${source.id} dir=$relativeDir " +
@@ -2060,6 +2063,7 @@ object SmbGateway {
                             relativeDir,
                             merged,
                             sessionCurrent = false,
+                            childrenFresh = true,
                         )
                         withContext(Dispatchers.Main.immediate) {
                             onCached?.invoke(merged)

@@ -209,11 +209,14 @@ object WebDavGateway {
             shallow
         }
         // RAM-only until deep succeeds (same reason as SMB — avoid slim false-complete).
+        // childrenFresh: these rows ARE this session's live child list, so browse may
+        // fetch thumbs now; only the deferred peeks are still missing.
         BrowseSession.putWebDavListing(
             source.id,
             relativeDir,
             shallowMerged,
             sessionCurrent = false,
+            childrenFresh = true,
         )
         logcat("FolderIndex") {
             "WebDAV shallow list source=${source.id} dir=$relativeDir " +
@@ -243,6 +246,7 @@ object WebDavGateway {
                                 relativeDir,
                                 merged,
                                 sessionCurrent = false,
+                                childrenFresh = true,
                             )
                             onCached?.invoke(merged)
                         },

@@ -132,10 +132,19 @@ object BrowseSession {
      * - [sessionCurrent] true: full or slim list for **this exact directory** succeeded in
      *   the current process — skip quick scan; remote thumbs allowed.
      * Failed/offline slim refresh leaves the entry non-current.
+     *
+     * [childrenFresh] is the **thumb** generation flag, separate from the quick-scan one:
+     * true when the child rows themselves came from a live list this process (shallow paint,
+     * partial deep publish, slim, full deep) even if [sessionCurrent] is still false because
+     * the deferred peek/classify is pending or timed out. The child names/sizes are live at
+     * that point, so remote thumbs may be fetched; only a disk-hydrated listing (never listed
+     * this process) keeps it false. Otherwise a big folder withholds every thumbnail for the
+     * whole deep classify — minutes on a large tree — while the rows are already on screen.
      */
     data class CachedRemoteListing(
         val entries: List<BrowseEntryRemote>,
         val sessionCurrent: Boolean,
+        val childrenFresh: Boolean = false,
     )
 
     /** Same generation flag as [CachedRemoteListing], for local SAF/FS folder browse. */
@@ -256,18 +265,28 @@ object BrowseSession {
 
     fun isSmbListingSessionCurrent(sourceId: Long, relativeDir: String): Boolean = smbListings[smbListingKey(sourceId, relativeDir)]?.sessionCurrent == true
 
+    /** Child rows came from a live list this process — see [CachedRemoteListing.childrenFresh]. */
+    fun isSmbListingChildrenFresh(sourceId: Long, relativeDir: String): Boolean = smbListings[smbListingKey(sourceId, relativeDir)]?.childrenFresh == true
+
     /**
      * @param sessionCurrent true after a successful full/slim list in this process for [relativeDir].
      *   Disk-hydrated listings must use false.
+     * @param childrenFresh defaults to [sessionCurrent]; live shallow/partial publishes inside the
+     *   deep classify must pass true while keeping [sessionCurrent] false.
      */
     fun putSmbListing(
         sourceId: Long,
         relativeDir: String,
         entries: List<BrowseEntryRemote>,
         sessionCurrent: Boolean,
+        childrenFresh: Boolean = sessionCurrent,
     ) {
         smbListings[smbListingKey(sourceId, relativeDir)] =
-            CachedRemoteListing(entries = entries, sessionCurrent = sessionCurrent)
+            CachedRemoteListing(
+                entries = entries,
+                sessionCurrent = sessionCurrent,
+                childrenFresh = childrenFresh,
+            )
     }
 
     fun invalidateSmbListing(sourceId: Long, relativeDir: String? = null) {
@@ -349,14 +368,22 @@ object BrowseSession {
 
     fun isWebDavListingSessionCurrent(sourceId: Long, relativeDir: String): Boolean = webDavListings[webDavListingKey(sourceId, relativeDir)]?.sessionCurrent == true
 
+    /** Child rows came from a live list this process — see [CachedRemoteListing.childrenFresh]. */
+    fun isWebDavListingChildrenFresh(sourceId: Long, relativeDir: String): Boolean = webDavListings[webDavListingKey(sourceId, relativeDir)]?.childrenFresh == true
+
     fun putWebDavListing(
         sourceId: Long,
         relativeDir: String,
         entries: List<BrowseEntryRemote>,
         sessionCurrent: Boolean,
+        childrenFresh: Boolean = sessionCurrent,
     ) {
         webDavListings[webDavListingKey(sourceId, relativeDir)] =
-            CachedRemoteListing(entries = entries, sessionCurrent = sessionCurrent)
+            CachedRemoteListing(
+                entries = entries,
+                sessionCurrent = sessionCurrent,
+                childrenFresh = childrenFresh,
+            )
     }
 
     fun invalidateWebDavListing(sourceId: Long, relativeDir: String? = null) {

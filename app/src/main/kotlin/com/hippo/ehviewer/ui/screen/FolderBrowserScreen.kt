@@ -319,7 +319,11 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
             )
             listedPath = frameListKey(frame)
             loading = false
-            refreshing = !cached.sessionCurrent
+            // Rows for this path are on screen: the listing is done from the user's point of
+            // view. A stale-cache quick scan / deep classify still runs in the background and
+            // repaints when it lands — it must not hold the refresh indicator up for up to
+            // DEEP_CLASSIFY_TIMEOUT_MS while the rows are already visible.
+            refreshing = false
             error = null
             return true
         }
@@ -331,7 +335,9 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
         entries = materializeLocalEntries(effective, cached.entries)
         listedPath = frameListKey(frame)
         loading = false
-        refreshing = !cached.sessionCurrent
+        // Same as the zip branch: cached rows are visible, so the pending quick scan /
+        // deep classify is a silent background refine, not a blocking load.
+        refreshing = false
         error = null
         return true
     }
@@ -430,7 +436,12 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                             entries = cached
                             listedPath = targetPath
                             error = null
-                            refreshing = true
+                            // This path's rows are painted — that IS the end of the load.
+                            // The deferred deep classify keeps running and repaints later;
+                            // it must not keep the spinner up (it can last minutes on a
+                            // large tree, which blocks thumbnails from being reached).
+                            loading = false
+                            refreshing = false
                         }
                     },
                 ) ?: error("Cannot read ZIP central directory")
@@ -472,9 +483,13 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                         entries = cached
                         listedPath = targetPath
                         error = null
-                        // Rows visible; keep refresh indicator until listDirectory returns
-                        // (deferred deep / slim still running). Match SMB/WebDAV.
-                        refreshing = true
+                        // Rows for this path are painted — stop the load here instead of
+                        // waiting for listDirectory. The shallow paint is followed by the
+                        // deep peek/classify (up to DEEP_CLASSIFY_TIMEOUT_MS); keeping
+                        // loading/refreshing true for that whole window left the
+                        // pull-to-refresh spinner running over an already complete listing.
+                        loading = false
+                        refreshing = false
                     }
                 },
             )

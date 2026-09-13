@@ -338,10 +338,24 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
     var forceNextLoad by remember { mutableStateOf(false) }
 
     /**
-     * True after a successful full/slim list of the currently shown directory in this process.
-     * Disk-hydrated (old) listings stay false so UI withholds network thumbs.
+     * True when the **currently shown** directory's child rows came from a live list in this
+     * process — a successful full/slim list *or* the shallow paint that precedes the deferred
+     * peek/classify ([BrowseSession.CachedRemoteListing.childrenFresh]).
+     *
+     * Only disk-hydrated (never listed this process) listings stay false, so network thumbs
+     * are withheld for those alone. Gating on session-current alone left a big folder with no
+     * thumbnails at all until the deep classify finished — minutes on a large tree, or
+     * permanently when it times out — even though the rows were already on screen.
      */
-    var listingSessionCurrent by remember { mutableStateOf(false) }
+    var listingThumbsLive by remember { mutableStateOf(false) }
+
+    /** Thumb gate for [dir]: session-current **or** its children were listed live this process. */
+    fun thumbsLive(dir: String): Boolean =
+        BrowseSession.isWebDavListingSessionCurrent(sourceId, dir) ||
+            BrowseSession.isWebDavListingChildrenFresh(sourceId, dir)
+
+    /** Latest shown dir — the gateway's list job outlives a cancelled [LaunchedEffect]. */
+    val currentRelativeDir = rememberUpdatedState(relativeDir)
 
     /**
      * Paint session-cache listing immediately when changing path (go up / enter).
@@ -351,7 +365,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
     fun applyCachedListing(dir: String): Boolean {
         val cached = BrowseSession.getWebDavCachedListing(sourceId, dir) ?: return false
         entries = ZipAsDirListing.presentCachedListing(cached.entries)
-        listingSessionCurrent = cached.sessionCurrent
+        listingThumbsLive = cached.sessionCurrent || cached.childrenFresh
         listedDir = dir
         loading = false
         error = null
@@ -373,7 +387,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         val presented = ZipAsDirListing.presentCachedListing(disk)
         BrowseSession.putWebDavListing(sourceId, dir, presented, sessionCurrent = false)
         entries = presented
-        listingSessionCurrent = false
+        listingThumbsLive = false
         listedDir = dir
         loading = false
         error = null
@@ -459,7 +473,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 if (listedDir != loadDir || entries.isEmpty()) {
                     entries = FolderGalleryIndex.photoGridRemoteFiles(names)
                     listedDir = loadDir
-                    listingSessionCurrent = true
+                    listingThumbsLive = true
                 }
                 loading = false
                 refreshing = false
@@ -490,7 +504,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
             if (entries.isEmpty()) {
                 error = denied
                 listedDir = loadDir
-                listingSessionCurrent = false
+                listingThumbsLive = false
                 WebDavRepository.markError(src.id, denied)
             }
             loading = false
@@ -508,20 +522,27 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 loadDir,
                 useCache = !force && !configChanged,
                 onCached = { cached ->
-                    entries = cached
-                    listedDir = loadDir
-                    listingSessionCurrent =
-                        BrowseSession.isWebDavListingSessionCurrent(sourceId, loadDir)
-                    error = null
-                    // Rows visible; keep refresh indicator until listDirectory returns.
-                    refreshing = true
+                    // The gateway list job is process-scoped: a paint can still land after this
+                    // effect was cancelled by a path change. Ignore it instead of writing rows
+                    // (and clearing the spinner) for a directory we already left.
+                    if (currentRelativeDir.value == loadDir) {
+                        entries = cached
+                        listedDir = loadDir
+                        listingThumbsLive = thumbsLive(loadDir)
+                        error = null
+                        // This path's rows are painted — that IS the end of the load. The
+                        // deferred deep/slim pass keeps running and repaints later; it must not
+                        // hold the refresh indicator (it can last DEEP_CLASSIFY_TIMEOUT_MS)
+                        // over an already complete listing.
+                        loading = false
+                        refreshing = false
+                    }
                 },
             )
             // Still the active effect for this path (not cancelled) → safe to commit.
             entries = result
             listedDir = loadDir
-            listingSessionCurrent =
-                BrowseSession.isWebDavListingSessionCurrent(sourceId, loadDir)
+            listingThumbsLive = thumbsLive(loadDir)
             WebDavRepository.markOk(src.id)
             error = null
             loading = false
@@ -533,12 +554,11 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
             if (entries.isEmpty()) {
                 error = e.message
                 listedDir = loadDir
-                listingSessionCurrent = false
+                listingThumbsLive = false
                 WebDavRepository.markError(src.id, e.message ?: "error")
             } else {
                 error = null
-                listingSessionCurrent =
-                    BrowseSession.isWebDavListingSessionCurrent(sourceId, loadDir)
+                listingThumbsLive = thumbsLive(loadDir)
             }
             loading = false
             refreshing = false
@@ -725,7 +745,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         }
         val entered = entry.relativeName.isNotEmpty()
         val names = FolderGalleryIndex.completeNames(entry)
-        val parentCurrent = listingSessionCurrent
+        val parentCurrent = listingThumbsLive
         if (entered) {
             enterDir(entry.relativeName)
         }
@@ -735,7 +755,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         if (entered && names != null) {
             entries = FolderGalleryIndex.photoGridRemoteFiles(names)
             listedDir = remote
-            listingSessionCurrent = parentCurrent
+            listingThumbsLive = parentCurrent
             loading = false
             refreshing = false
             error = null
@@ -1279,7 +1299,10 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 }
                 else -> {
                     val dirKey = listedDir ?: relativeDir
-                    val allowRemoteThumbs = listingSessionCurrent
+                    // Old (disk-hydrated / never listed this process) listings: disk thumbs OK,
+                    // no network jobs. A live shallow paint already counts as live — waiting for
+                    // the deep classify would withhold every thumb on a big folder.
+                    val allowRemoteThumbs = listingThumbsLive
                     val favoritesOnTop by Settings.browseFavoritesOnTop.collectAsState()
                     val browseSortModePref by Settings.browseSortMode.collectAsState()
                     val browseSortMode = BrowseSortMode.fromPref(browseSortModePref)
