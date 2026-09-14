@@ -56,11 +56,11 @@ object SmbCache {
     private const val THUMB_FORMAT_VERSION = 3
 
     /**
-     * Concurrent full-file SMB fetches for thumb generation. Follows Advanced → SMB
-     * concurrent connections × ops per session ([ThumbConcurrency.smb]); the real per-host
-     * bound stays in [com.hippo.ehviewer.smb.SmbGateway].
+     * Concurrent full-file SMB fetches for thumb generation — same settings-derived
+     * budget as every other thumbnail path ([ThumbConcurrency.thumbBudget]); the real
+     * per-host bound stays in [com.hippo.ehviewer.smb.SmbGateway].
      */
-    private val thumbFetchSlots = SettingSlots { ThumbConcurrency.smb() }
+    private val thumbFetchSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /** Share folder/gallery thumbnail network capacity with video prefix fetches. */
     suspend fun <T> withBrowseThumbFetchSlot(block: suspend () -> T): T = thumbFetchSlots.gate().withPermit { block() }

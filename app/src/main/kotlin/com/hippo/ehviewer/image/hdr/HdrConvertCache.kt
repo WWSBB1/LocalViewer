@@ -15,6 +15,8 @@ import com.hippo.ehviewer.jni.convertJxrBytesToUltraHdrMaxEdge
 import com.hippo.ehviewer.jni.convertJxrToUltraHdr
 import com.hippo.ehviewer.jni.probeAvifHdrKind
 import com.hippo.ehviewer.library.OriginDiskCache
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.util.FileUtils
 import java.io.File
 import java.io.FileOutputStream
@@ -26,7 +28,6 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -60,17 +61,18 @@ object HdrConvertCache {
 
     /**
      * Full-page UHDR (reader / page cache, [maxEdge] = 0).
-     * One full-res JXR/JXL/PQ-AVIF holds multi‑MB compressed + F16 RGBA + encode
-     * scratch — keep serial so mid-range heaps do not thrash with blocking GC Alloc.
      * **Not shared with thumbs** so library scroll MaxEdge work cannot starve the reader.
+     * Width follows the settings ([ThumbConcurrency.thumbBudget]) — no hardcoded cap;
+     * each concurrent convert holds multi-MB compressed + F16 RGBA + encode scratch.
      */
-    private val fullConvertSlots = Semaphore(2)
+    private val fullConvertSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /**
      * Browse / cover MaxEdge thumbs. Separate pool from [fullConvertSlots]: thumbs are
      * still heavy (native decodes full F16 then scales) but must not block reader pages.
+     * Settings-derived like every other thumbnail path ([ThumbConcurrency.thumbBudget]).
      */
-    private val thumbConvertSlots = Semaphore(1)
+    private val thumbConvertSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /**
      * Exts that *can* use the RAM → classify → UHDR convert pipeline on network download
@@ -477,7 +479,7 @@ object HdrConvertCache {
             }
         }
         // Thumbs and full pages use separate permits so browse MaxEdge cannot block reader.
-        val slots = if (maxEdge > 0) thumbConvertSlots else fullConvertSlots
+        val slots = if (maxEdge > 0) thumbConvertSlots.gate() else fullConvertSlots.gate()
         slots.withPermit {
             val lockKey = output.absolutePath
             val mutex = pathLocks.getOrPut(lockKey) { Mutex() }
@@ -576,7 +578,7 @@ object HdrConvertCache {
     private suspend fun convertJxrViaPath(inputPath: String, output: File): Boolean = withContext(Dispatchers.IO) {
         if (output.isFile && output.length() > 0L) return@withContext true
         // Full-page path convert — same pool as byte full-res so it cannot race two fulls.
-        fullConvertSlots.withPermit {
+        fullConvertSlots.gate().withPermit {
             val lockKey = output.absolutePath
             val mutex = pathLocks.getOrPut(lockKey) { Mutex() }
             mutex.withLock {

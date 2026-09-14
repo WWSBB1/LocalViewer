@@ -34,11 +34,12 @@ object WebDavCache {
     const val THUMB_DISK_EDGE = OriginDiskCache.THUMB_EDGE
     private const val THUMB_WEBP_QUALITY = OriginDiskCache.THUMB_QUALITY
     private const val THUMB_FORMAT_VERSION = 2
-    private val thumbFetchSlots = SettingSlots { ThumbConcurrency.webDav() }
+    private val thumbFetchSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /**
      * Share folder/gallery thumbnail network capacity with video prefix fetches.
-     * Follows Advanced → WebDAV concurrent downloads ([ThumbConcurrency.webDav]).
+     * Same settings-derived budget as every other thumbnail path
+     * ([ThumbConcurrency.thumbBudget]).
      */
     suspend fun <T> withBrowseThumbFetchSlot(block: suspend () -> T): T = thumbFetchSlots.gate().withPermit { block() }
 

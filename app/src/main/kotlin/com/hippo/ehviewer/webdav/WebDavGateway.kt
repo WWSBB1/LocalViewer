@@ -11,6 +11,7 @@ import com.hippo.ehviewer.library.NetworkFolderIndexCache
 import com.hippo.ehviewer.library.RemoteChild
 import com.hippo.ehviewer.library.RemoteDirectorySlimPlan
 import com.hippo.ehviewer.library.SMB_PROMOTE_MAX_LEAVES
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipCdParse
 import com.hippo.ehviewer.library.ZipCentralDirectory
@@ -53,10 +54,12 @@ object WebDavGateway {
     /** Deep peek/classify budget after shallow paint; keep shallow on expiry. */
     private const val DEEP_CLASSIFY_TIMEOUT_MS = 180_000L
 
-    private const val PEEK_CONCURRENCY_MAX = 20
-
-    /** Subfolder PROPFIND / zip-root fan-out. Advanced → WebDAV concurrent listing. */
-    private fun peekConcurrency(): Int = Settings.webDavConcurrentListing.value.coerceIn(3, PEEK_CONCURRENCY_MAX)
+    /**
+     * Subfolder PROPFIND / zip-root fan-out. Advanced → WebDAV concurrent listing, read
+     * from the settings-fed volatile ([ThumbConcurrency.webDavListing]) — never a blocking
+     * preference read, and no clamp below what the user configured.
+     */
+    private fun peekConcurrency(): Int = ThumbConcurrency.webDavListing()
 
     fun sourceConfigKey(source: WebDavSourceEntity): String = "${source.id}|${source.baseUrl}|${source.pathPrefix}|${source.username}"
 

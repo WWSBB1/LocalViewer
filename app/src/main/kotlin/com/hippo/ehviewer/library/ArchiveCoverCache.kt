@@ -34,7 +34,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okio.Path
 import okio.Path.Companion.toOkioPath
@@ -89,8 +88,9 @@ object ArchiveCoverCache {
      * Parallel first-page extracts. ZIP (and documents) never take the process-global
      * [ArchiveAccess] native session, so these really do run at once; native-format
      * covers queue behind [ArchiveAccess.tryWithArchiveQueued] instead.
+     * Settings-derived like every other thumbnail path ([ThumbConcurrency.thumbBudget]).
      */
-    private val extractSlots = Semaphore(10)
+    private val extractSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /** Single-member ZIP cover cap; a larger page 0 falls back to the native path. */
     private const val ZIP_COVER_MAX_BYTES = ZipCentralDirectory.MAX_EXTRACT_BYTES
@@ -465,7 +465,7 @@ object ArchiveCoverCache {
         if (isZip) {
             zipCoverParallel(cacheKey, openSource, dest)?.let { return it }
         }
-        val outcome = extractSlots.withPermit {
+        val outcome = extractSlots.gate().withPermit {
             existingCover(dest)?.let {
                 return@withPermit StreamExtractOutcome.Terminal(CoverEnsureResult.Hit(it))
             }
@@ -582,7 +582,7 @@ object ArchiveCoverCache {
         dest: Path,
     ): CoverEnsureResult? {
         var cached = false
-        val page = extractSlots.withPermit {
+        val page = extractSlots.gate().withPermit {
             if (existingCover(dest) != null) {
                 cached = true
                 null
@@ -875,7 +875,7 @@ object ArchiveCoverCache {
         val dest = thumbPathFor(cacheKey, 0L, 0L)
         existingCover(dest)?.let { return@withIOContext CoverEnsureResult.Hit(it) }
         coverFromDocumentExtractCache(cacheKey)?.let { return@withIOContext CoverEnsureResult.Hit(it) }
-        extractSlots.withPermit {
+        extractSlots.gate().withPermit {
             existingCover(dest)?.let { return@withPermit CoverEnsureResult.Hit(it) }
             coverFromDocumentExtractCache(cacheKey)?.let { return@withPermit CoverEnsureResult.Hit(it) }
             try {
@@ -905,7 +905,7 @@ object ArchiveCoverCache {
         val dest = thumbPathFor(key, 0L, 0L)
         existingCover(dest)?.let { return CoverEnsureResult.Hit(it) }
         coverFromDocumentExtractCache(key)?.let { return CoverEnsureResult.Hit(it) }
-        return extractSlots.withPermit {
+        return extractSlots.gate().withPermit {
             existingCover(dest)?.let { return@withPermit CoverEnsureResult.Hit(it) }
             coverFromDocumentExtractCache(key)?.let { return@withPermit CoverEnsureResult.Hit(it) }
             try {
@@ -985,7 +985,7 @@ object ArchiveCoverCache {
         // Prefer page already extracted by a prior solid reader session.
         coverFromSolidExtractCache(cacheKey)?.let { return CoverEnsureResult.Hit(it) }
 
-        val outcome = extractSlots.withPermit {
+        val outcome = extractSlots.gate().withPermit {
             existingCover(dest)?.let {
                 return@withPermit SolidExtractOutcome.Terminal(CoverEnsureResult.Hit(it))
             }

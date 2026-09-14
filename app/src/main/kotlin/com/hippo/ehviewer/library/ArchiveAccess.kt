@@ -7,10 +7,10 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
@@ -49,20 +49,48 @@ object ArchiveAccess {
     private val abortAction = AtomicReference<(() -> Unit)?>(null)
 
     /**
-     * Cover extract queue. The native archive session is process-global, so only one cover
-     * open/extract can run at a time: without this queue a second [tryWithArchiveQueued]
-     * caller loses `tryLock()` and gets null (callers read that as "skip, retry later")
-     * even when no reader is competing at all.
+     * Cover extract queue width. The native archive session is process-global, so only one
+     * cover open/extract can run at a time; the queue only decides how many covers *wait*
+     * for it instead of being skipped. Follows the settings ([ThumbConcurrency.thumbBudget]).
      */
-    private val coverQueue = Semaphore(1)
+    private val coverQueue = SettingSlots { ThumbConcurrency.thumbBudget() }
+
+    /** Poll interval while waiting for another cover's native session to finish. */
+    private const val COVER_WAIT_POLL_MS = 25L
 
     /**
-     * Cover extract: queued behind other covers, still skipped while a reader is
-     * pending/holding (readers keep preempting covers).
+     * Cover extract: waits for another cover's native session (never two natives at once),
+     * still skipped the moment a reader arrives — readers keep preempting covers.
      * @return null if a reader arrived — same contract as [tryWithArchive].
      */
     suspend fun <T> tryWithArchiveQueued(block: suspend () -> T): T? =
-        coverQueue.withPermit { tryWithArchive(block) }
+        coverQueue.gate().withPermit {
+            if (pendingReaders.get() > 0) return@withPermit null
+            val myGen = latestGeneration.get()
+            // tryLock failing with no reader pending can only mean another cover holds the
+            // native session — wait it out instead of reporting a skip.
+            while (!mutex.tryLock()) {
+                if (pendingReaders.get() > 0 || latestGeneration.get() != myGen) {
+                    return@withPermit null
+                }
+                delay(COVER_WAIT_POLL_MS)
+            }
+            try {
+                if (pendingReaders.get() > 0 || latestGeneration.get() != myGen) {
+                    return@withPermit null
+                }
+                val job = currentCoroutineContext().job
+                holderJob.set(job)
+                try {
+                    currentCoroutineContext().ensureActive()
+                    block()
+                } finally {
+                    holderJob.compareAndSet(job, null)
+                }
+            } finally {
+                mutex.unlock()
+            }
+        }
 
     /**
      * Register [action] to run when a reader preempts (or immediately if a reader is already

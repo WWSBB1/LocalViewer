@@ -1459,7 +1459,15 @@ object ExternalHttpStreamServer {
     private const val STABLE_TOKEN_DOMAIN = "LocalViewer external HTTP session v1"
     private const val TOKEN_SALT_BYTES = 32
     private const val HEX_DIGITS = "0123456789abcdef"
-    private const val MAX_CONCURRENT_CONNECTIONS = 16
+    /**
+     * Loopback connections follow the SMB sticky video lanes ([SmbGateway.httpStickyPoolSize]):
+     * external players (ExoPlayer/VLC) open ~[HTTP_CONNECTIONS_PER_STREAM] sockets per stream,
+     * plus one for a probe.
+     */
+    private val MAX_CONCURRENT_CONNECTIONS: Int
+        get() = SmbGateway.httpStickyPoolSize() * HTTP_CONNECTIONS_PER_STREAM + 1
+
+    private const val HTTP_CONNECTIONS_PER_STREAM = 3
     private const val MAX_FILE_NAME_LENGTH = 1024
     private const val MAX_RELATIVE_PATH_LENGTH = 2048
     private const val MAX_RELATIVE_DEPTH = 16

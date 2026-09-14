@@ -9,6 +9,8 @@ import com.hippo.ehviewer.image.ImageSource
 import com.hippo.ehviewer.image.PathSource
 import com.hippo.ehviewer.image.byteBufferSource
 import com.hippo.ehviewer.image.hdr.HdrConvertCache
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipMemberCover
 import com.hippo.ehviewer.smb.SmbArchiveByteSource
@@ -24,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import moe.tarsin.kt.install
 import okio.Path
@@ -52,17 +53,12 @@ suspend inline fun <T> useSmbFolderPageLoader(
         check(imageFileNames.isNotEmpty()) { "No images in SMB folder" }
         val password = SmbPasswordStore.get(source.id)
         val size = imageFileNames.size
-        val maxOps = SmbGateway.maxConcurrentOpsPerHost().coerceAtLeast(1)
-        // Reserve 1 op for the page the user is looking at / just seeked to.
-        val interactiveSlots = Semaphore(1)
-        val prefetchSlots = if (maxOps <= 1) {
-            interactiveSlots
-        } else {
-            Semaphore(maxOps - 1)
-        }
-        // B1 convert mode: cap concurrent lib downloads (full convert is serial in
-        // HdrConvertCache.fullConvertSlots). Direct-Bitmap uses normal prefetchSlots.
-        val libHdrPrefetchSlots = Semaphore(2)
+        // One settings-derived budget for every fetch class — no reserved lane, no minus-1.
+        // B1 convert mode: concurrent lib downloads ride the same budget; the transport
+        // bound stays in [SmbGateway].
+        val interactiveSlots = SettingSlots { ThumbConcurrency.smb() }
+        val prefetchSlots = SettingSlots { ThumbConcurrency.smb() }
+        val libHdrPrefetchSlots = SettingSlots { ThumbConcurrency.smb() }
         // In-flight downloads by page index — join small-jump overlap, cancel large jumps.
         val downloadJobs = KeyedJobRegistry<Int>()
 
@@ -241,7 +237,7 @@ suspend inline fun <T> useSmbFolderPageLoader(
                                 isLibHdrCandidate(nameForSlot) -> libHdrPrefetchSlots
                                 else -> prefetchSlots
                             }
-                            slots.withPermit {
+                            slots.gate().withPermit {
                                 if (skipDisk) {
                                     downloadToRam(index)
                                 } else {

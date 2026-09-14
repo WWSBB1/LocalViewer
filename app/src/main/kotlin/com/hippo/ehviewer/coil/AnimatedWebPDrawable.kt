@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable
 import android.os.SystemClock
 import androidx.core.graphics.createBitmap
 import com.ehviewer.core.util.logcat
+import com.hippo.ehviewer.library.ThumbConcurrency
 import java.nio.ByteBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +26,7 @@ import kotlinx.coroutines.runBlocking
 // JNI GetDirectBufferAddress requires a direct buffer; ZIP/RAM pages are heap wraps.
 class AnimatedWebPDrawable(source: ByteBuffer) : Drawable(), Animatable {
     private val source: ByteBuffer = source.ensureDirectForNative()
-    private val decodeScope = CoroutineScope(Dispatchers.IO.limitedParallelism(1))
+    private val decodeScope = CoroutineScope(Dispatchers.IO.limitedParallelism(ThumbConcurrency.thumbBudget()))
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val decoder = nativeCreateDecoder(this.source)
     private val width: Int

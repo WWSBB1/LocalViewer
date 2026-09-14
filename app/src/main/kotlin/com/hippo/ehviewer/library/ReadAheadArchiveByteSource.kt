@@ -596,12 +596,14 @@ class ReadAheadArchiveByteSource(
          * Bounded pipeline prefetch. Was [java.util.concurrent.Executors.newCachedThreadPool]
          * (unbounded grow) — many concurrent archive streams could spawn a thread each.
          * One in-flight prefetch per source; shared pool caps process-wide fan-out.
+         * Fan-out follows the settings ([ThumbConcurrency.THUMB_BUDGET_MAX]) instead of a
+         * fixed 2/8; threads are created on demand, so an idle app keeps none.
          */
         private val PREFETCH_EXECUTOR = ThreadPoolExecutor(
             /* core */
-            2,
+            ThumbConcurrency.THUMB_BUDGET_MAX,
             /* max */
-            8,
+            ThumbConcurrency.THUMB_BUDGET_MAX,
             30L,
             TimeUnit.SECONDS,
             LinkedBlockingQueue(16),

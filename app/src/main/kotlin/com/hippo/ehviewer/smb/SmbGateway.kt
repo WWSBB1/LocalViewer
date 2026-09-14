@@ -26,6 +26,8 @@ import com.hippo.ehviewer.library.NetworkFolderIndexCache
 import com.hippo.ehviewer.library.RemoteChild
 import com.hippo.ehviewer.library.RemoteDirectorySlimPlan
 import com.hippo.ehviewer.library.SMB_PROMOTE_MAX_LEAVES
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipCdParse
 import com.hippo.ehviewer.library.ZipCentralDirectory
@@ -119,7 +121,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * - **Spread then multiplex:** concurrent file ops (browse thumbs, reader pages)
  *   each take their own data TCP until the budget is used. Only then are leftover
  *   ops multiplexed onto the least-loaded session ([opsPerSession] slots, host-wide
- *   cap [MAX_SAFE_HOST_OPS]). Filling one session's slots first made the setting a
+ *   cap [maxConcurrentOpsPerHost]). Filling one session's slots first made the setting a
  *   max-session cap while work queued on a single TCP; extras stayed connected
  *   and idle.
  * - **Session identity:** `host|port|user|domain|password`
@@ -156,13 +158,6 @@ object SmbGateway {
     private const val OPS_PER_SESSION_DEFAULT = 3
     private const val OPS_PER_SESSION_SAFE = 1
     private const val CONNECTIONS_SAFE = 3
-
-    /**
-     * Hard cap on simultaneous ops **per host** (all sessions).
-     * 5×3=15 concurrent ~20MB page downloads OOMs / races Android mid-flight;
-     * 3×3=9 is the largest configuration confirmed stable on device.
-     */
-    private const val MAX_SAFE_HOST_OPS = 18
 
     private const val KEEPALIVE_INTERVAL_MS = 40_000L
 
@@ -225,11 +220,11 @@ object SmbGateway {
     fun maxConnectionsPerSource(): Int = maxConnectionsPerHost()
 
     /**
-     * App-level download/list gate. Always ≤ [MAX_SAFE_HOST_OPS] so raising session count
-     * does not explode concurrent 20MB transfers (OOM) or smbj mid-close races.
-     * Safe mode: 3 sessions × 1 op = 3 concurrent transfers.
+     * App-level download/list gate: configured connections × ops per session.
+     * Safe mode: 3 sessions × 1 op = 3 concurrent transfers. No extra ceiling — the
+     * Advanced settings are the only budget.
      */
-    fun maxConcurrentOpsPerHost(): Int = (maxConnectionsPerHost() * opsPerSession()).coerceIn(1, MAX_SAFE_HOST_OPS)
+    fun maxConcurrentOpsPerHost(): Int = (maxConnectionsPerHost() * opsPerSession()).coerceAtLeast(1)
 
     /** Reader toggle changed — drop pools so new sessions use the new op/session budget. */
     fun onReaderSafeConcurrencyChanged() {
@@ -561,15 +556,15 @@ object SmbGateway {
         }
     }
 
-    /**
-     * Cap concurrent **video** sticky TCP sessions (HTTP loopback + in-app streamdoc).
-     * One lane per video; 2 is a teardown cushion while the previous lease's TCP closes.
-     */
-    private const val HTTP_STICKY_POOL_SIZE = 2
-
     /** Safety bound if an evicted SMB transport does not release its permit promptly. */
     private const val HTTP_STICKY_WAIT_TIMEOUT_MS = 10_000L
-    private val httpStickyPermits = Semaphore(HTTP_STICKY_POOL_SIZE)
+
+    /**
+     * Concurrent **video** sticky TCP sessions (HTTP loopback + in-app streamdoc).
+     * Width follows Advanced → SMB concurrent connections ([ThumbConcurrency.smb]) —
+     * no hardcoded 2-lane cap.
+     */
+    private val httpStickyPermits = SettingSlots { ThumbConcurrency.smb() }
 
     /**
      * One logical claim on an HTTP sticky slot.
@@ -581,20 +576,35 @@ object SmbGateway {
     class HttpStickyLease internal constructor() {
         private val state = AtomicInteger(LEASE_IDLE)
 
-        internal fun attach(): Boolean = state.compareAndSet(LEASE_IDLE, LEASE_ACQUIRED)
+        /**
+         * Semaphore instance that granted this lease's permit. The pool is re-sized when
+         * the concurrency setting changes, so a release must go back to the same instance
+         * it took the permit from.
+         */
+        private val granted = AtomicReference<Semaphore?>(null)
 
-        internal fun release(): Boolean = state.compareAndSet(LEASE_ACQUIRED, LEASE_IDLE)
+        internal fun attach(semaphore: Semaphore): Boolean {
+            if (!state.compareAndSet(LEASE_IDLE, LEASE_ACQUIRED)) return false
+            granted.set(semaphore)
+            return true
+        }
 
-        /** @return true when cancellation must release an acquired semaphore permit. */
-        internal fun cancel(): Boolean {
+        /** @return the semaphore to release, or null when this lease held nothing. */
+        internal fun release(): Semaphore? =
+            if (state.compareAndSet(LEASE_ACQUIRED, LEASE_IDLE)) granted.getAndSet(null) else null
+
+        /** @return the semaphore to release when cancellation preempts an acquired lease. */
+        internal fun cancel(): Semaphore? {
             while (true) {
                 when (state.get()) {
-                    LEASE_CANCELLED -> return false
+                    LEASE_CANCELLED -> return null
                     LEASE_IDLE -> {
-                        if (state.compareAndSet(LEASE_IDLE, LEASE_CANCELLED)) return false
+                        if (state.compareAndSet(LEASE_IDLE, LEASE_CANCELLED)) return null
                     }
                     LEASE_ACQUIRED -> {
-                        if (state.compareAndSet(LEASE_ACQUIRED, LEASE_CANCELLED)) return true
+                        if (state.compareAndSet(LEASE_ACQUIRED, LEASE_CANCELLED)) {
+                            return granted.getAndSet(null)
+                        }
                     }
                 }
             }
@@ -610,7 +620,7 @@ object SmbGateway {
     internal fun newHttpStickyLease(): HttpStickyLease = HttpStickyLease()
 
     internal fun cancelHttpStickyLease(lease: HttpStickyLease) {
-        if (lease.cancel()) releaseHttpStickyPermit("preempt")
+        lease.cancel()?.let { releaseHttpStickyPermit(it, "preempt") }
     }
 
     /**
@@ -620,10 +630,10 @@ object SmbGateway {
     @Volatile
     var onHttpStickyPoolPressure: (() -> Unit)? = null
 
-    /** Free slots in the HTTP sticky pool (0…[HTTP_STICKY_POOL_SIZE]). */
-    fun httpStickyPoolAvailable(): Int = httpStickyPermits.availablePermits
+    /** Free slots in the HTTP sticky pool. */
+    fun httpStickyPoolAvailable(): Int = httpStickyGate().availablePermits
 
-    fun httpStickyPoolSize(): Int = HTTP_STICKY_POOL_SIZE
+    fun httpStickyPoolSize(): Int = ThumbConcurrency.smb()
 
     /** Live Fuse/HTTP sticky TCP connections (outside the browse pool). */
     fun stickyConnectionCount(): Int = stickyConnections.size
@@ -737,10 +747,10 @@ object SmbGateway {
         private val closed = AtomicBoolean(false)
 
         /**
-         * Host-wide op gate (≤ [MAX_SAFE_HOST_OPS]). Prevents 5×3 / 7×3 concurrent large
-         * reads from OOMing or racing session teardown under high throughput.
+         * Host-wide op gate — settings-derived ([maxConcurrentOpsPerHost] at pool
+         * creation), so the Advanced concurrency settings are the only budget.
          */
-        private val hostOpSlots = Semaphore(MAX_SAFE_HOST_OPS)
+        private val hostOpSlots = Semaphore(maxConcurrentOpsPerHost())
 
         /** Wakes waiters when an op finishes or a session is added. */
         private val freeSignal = Channel<Unit>(Channel.CONFLATED)
@@ -1305,7 +1315,7 @@ object SmbGateway {
                         error(
                             "SMB host $hostPortKey busy: no free op slot for this user " +
                                 "(sessions=${liveDataCount()}/${maxConnectionsPerHost()}, " +
-                                "ops/session=${opsPerSession()}, hostOps≤$MAX_SAFE_HOST_OPS, " +
+                                "ops/session=${opsPerSession()}, hostOps≤${maxConcurrentOpsPerHost()}, " +
                                 "pool=${poolDebugSummary()})",
                         )
                     }
@@ -2848,12 +2858,13 @@ object SmbGateway {
         block: (file: com.hierynomus.smbj.share.File, size: Long) -> T,
     ): T = withIOContext {
         val permitLease = lease ?: HttpStickyLease()
-        val got = acquireHttpStickyPermit(waitForSlot)
-        if (!got || !permitLease.attach()) {
-            if (got) releaseHttpStickyPermit("cancelled-before-open")
+        val gate = httpStickyGate()
+        val got = acquireHttpStickyPermit(gate, waitForSlot)
+        if (!got || !permitLease.attach(gate)) {
+            if (got) releaseHttpStickyPermit(gate, "cancelled-before-open")
             throw IOException(
-                "HTTP SMB sticky pool full or cancelled (cap=$HTTP_STICKY_POOL_SIZE, " +
-                    "available=${httpStickyPermits.availablePermits})",
+                "HTTP SMB sticky pool full or cancelled (cap=${httpStickyPoolSize()}, " +
+                    "available=${gate.availablePermits})",
             )
         }
         try {
@@ -2864,28 +2875,30 @@ object SmbGateway {
     }
 
     private fun releaseHttpStickyPermit(lease: HttpStickyLease, reason: String) {
-        if (lease.release()) releaseHttpStickyPermit(reason)
+        lease.release()?.let { releaseHttpStickyPermit(it, reason) }
     }
 
-    private fun releaseHttpStickyPermit(reason: String) {
-        httpStickyPermits.release()
+    private fun releaseHttpStickyPermit(gate: Semaphore, reason: String) {
+        gate.release()
         logcat {
             "SmbGateway: HTTP sticky release reason=$reason " +
-                "inUse=${HTTP_STICKY_POOL_SIZE - httpStickyPermits.availablePermits}/$HTTP_STICKY_POOL_SIZE"
+                "inUse=${httpStickyPoolSize() - gate.availablePermits}/${httpStickyPoolSize()}"
         }
     }
 
-    private suspend fun acquireHttpStickyPermit(waitForSlot: Boolean): Boolean {
-        if (httpStickyPermits.tryAcquire()) return true
+    private fun httpStickyGate(): Semaphore = httpStickyPermits.gate()
+
+    private suspend fun acquireHttpStickyPermit(gate: Semaphore, waitForSlot: Boolean): Boolean {
+        if (gate.tryAcquire()) return true
         if (!waitForSlot) return false
         // Free idle warm HTTP backends, then retry.
         runCatching { onHttpStickyPoolPressure?.invoke() }
-        if (httpStickyPermits.tryAcquire()) return true
+        if (gate.tryAcquire()) return true
         logcat {
-            "SmbGateway: HTTP sticky wait inUse=${HTTP_STICKY_POOL_SIZE - httpStickyPermits.availablePermits}/$HTTP_STICKY_POOL_SIZE"
+            "SmbGateway: HTTP sticky wait inUse=${httpStickyPoolSize() - gate.availablePermits}/${httpStickyPoolSize()}"
         }
         return withTimeoutOrNull(HTTP_STICKY_WAIT_TIMEOUT_MS) {
-            httpStickyPermits.acquire()
+            gate.acquire()
             true
         } ?: false
     }

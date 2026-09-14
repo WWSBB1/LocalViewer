@@ -22,6 +22,8 @@ import com.hippo.ehviewer.image.hdr.classify
 import com.hippo.ehviewer.image.hdr.classifyPath
 import com.hippo.ehviewer.image.hdr.exportImageExtension
 import com.hippo.ehviewer.image.hdr.needsLibDecode
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.util.FileUtils
 import com.hippo.ehviewer.util.OSUtils
 import com.hippo.ehviewer.util.detectAds
@@ -42,7 +44,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock as mutexWithLock
 import kotlinx.coroutines.sync.withPermit
 import moe.tarsin.coroutines.NamedMutex
@@ -124,17 +125,10 @@ abstract class PageLoader(
     private val exportFiles = ConcurrentHashMap<Int, Path>()
 
     /**
-     * Peak software decode is large; keep concurrency low on a 256 MiB heap.
-     * Cache-off also holds compressed bytes on the heap, so decode is 2-wide.
-     * Lib-direct F16 is further serialized inside [LibDirectDecode] (one at a time).
+     * Page decode width. Settings-derived ([ThumbConcurrency.thumbBudget]) — same budget
+     * as every other image path, no hardcoded 2/4 cap.
      */
-    private val semaphore = Semaphore(
-        when {
-            Settings.disableReaderNetworkCache.value -> 2
-            Settings.readerLibDirectBitmap.value -> 2
-            else -> 4
-        },
-    )
+    private val semaphore = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /**
      * Decoded-page budget. Weight is clamped so one huge bitmap can occupy the
@@ -658,7 +652,7 @@ abstract class PageLoader(
                 val runningJob = currentCoroutineContext()[Job]
                 try {
                     mutex.withLock(index) {
-                        semaphore.withPermit {
+                        semaphore.gate().withPermit {
                             atomicallyDecodeAndUpdate(index, forceOriginal = orgImg)
                         }
                     }

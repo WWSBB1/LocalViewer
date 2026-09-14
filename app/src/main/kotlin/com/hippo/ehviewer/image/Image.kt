@@ -484,7 +484,7 @@ class Image private constructor(
 
             suspend fun runDecode(m: DecodeSizeType, hdr: Boolean, hbd: Boolean): CoilImage = if (hbd) {
                 // Full-res F16: share lib-direct serialize lock.
-                LibDirectDecode.heavyDecode.withPermit {
+                LibDirectDecode.heavyDecode.gate().withPermit {
                     decodeCoilOnce(m, checkExtraneousAds, hdrSafe = hdr, platformHbd = true)
                 }
             } else {

@@ -10,6 +10,7 @@ import android.net.http.UrlRequest
 import android.net.http.UrlResponseInfo
 import android.os.Build
 import androidx.annotation.RequiresExtension
+import com.hippo.ehviewer.library.ThumbConcurrency
 import io.ktor.client.engine.HttpClientEngineBase
 import io.ktor.client.engine.callContext
 import io.ktor.client.plugins.HttpTimeoutCapability
@@ -40,13 +41,15 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class CronetEngine(override val config: CronetConfig) : HttpClientEngineBase("Cronet") {
-    // Limit thread to 1 since we are async & non-blocking
-    // See https://github.com/FooIbar/EhViewer/issues/2854 for dispatcher parallelism.
-    // override val dispatcher = Dispatchers.Default.limitedParallelism(1)
-
     override val supportedCapabilities = setOf(HttpTimeoutCapability)
 
-    private val executor = dispatcher.limitedParallelism(1).asExecutor()
+    /**
+     * Callback executor. **Not** a single thread: [UrlRequest.Callback.onReadCompleted]
+     * uses `trySendBlocking` for backpressure, so a 1-thread callback executor lets one
+     * slow consumer stall every other in-flight request. Sized to the settings' maximum
+     * thumbnail/fetch budget ([ThumbConcurrency.THUMB_BUDGET_MAX]).
+     */
+    private val executor = dispatcher.limitedParallelism(ThumbConcurrency.THUMB_BUDGET_MAX).asExecutor()
     private val pool = DirectByteBufferPool(32)
     private val clientLazy = lazy {
         with(config) { HttpEngine.Builder(context).apply(config).build() }

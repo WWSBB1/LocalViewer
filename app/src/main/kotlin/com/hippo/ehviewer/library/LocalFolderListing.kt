@@ -11,7 +11,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -24,9 +23,6 @@ import okio.Path.Companion.toPath
  * [classifyRemoteListingWithPeeks], optional disk index + slim quick scan.
  */
 object LocalFolderListing {
-    /** Same idea as SMB/WebDAV peek gates: cap fan-out on [Dispatchers.IO], no extra pool. */
-    private const val PEEK_PARALLELISM = 8
-
     /** Deep peek/classify budget after shallow paint; keep shallow on expiry. */
     private const val DEEP_CLASSIFY_TIMEOUT_MS = 180_000L
 
@@ -613,7 +609,8 @@ object LocalFolderListing {
             return
         }
         coroutineScope {
-            val gate = Semaphore(PEEK_PARALLELISM)
+            // Fan-out follows the settings ([ThumbConcurrency.thumbBudget]) — no fixed 8.
+            val gate = SettingSlots { ThumbConcurrency.thumbBudget() }.gate()
             items.map { item ->
                 async {
                     gate.withPermit {

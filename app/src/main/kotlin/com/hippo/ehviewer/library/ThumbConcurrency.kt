@@ -23,16 +23,13 @@ import kotlinx.coroutines.sync.Semaphore
  * plain field read.
  */
 object ThumbConcurrency {
-    /** `webdav_download_slots` bounds — keep in sync with arrays.xml and WebDavClient. */
-    private const val WEBDAV_MIN = 2
+    /** Keep in sync with arrays.xml and WebDavClient. */
     const val WEBDAV_MAX = 10
 
     /** [com.hippo.ehviewer.SmbGateway] CONNECTIONS range; mirrors `multi_thread_download`. */
-    private const val SMB_CONNECTIONS_MIN = 1
     private const val SMB_CONNECTIONS_MAX = 5
 
-    /** `webdav_concurrent_listing` bounds — keep in sync with arrays.xml. */
-    private const val WEBDAV_LISTING_MIN = 3
+    /** Keep in sync with arrays.xml. */
     const val WEBDAV_LISTING_MAX = 10
 
     /**
@@ -53,17 +50,17 @@ object ThumbConcurrency {
     init {
         scope.launch {
             Settings.webDavDownloadSlots.valueFlow().collectLatest { value ->
-                webDavSlots = value.coerceIn(WEBDAV_MIN, WEBDAV_MAX)
+                webDavSlots = value.coerceAtLeast(1)
             }
         }
         scope.launch {
             Settings.multiThreadDownload.valueFlow().collectLatest { value ->
-                smbConnections = value.coerceIn(SMB_CONNECTIONS_MIN, SMB_CONNECTIONS_MAX)
+                smbConnections = value.coerceAtLeast(1)
             }
         }
         scope.launch {
             Settings.webDavConcurrentListing.valueFlow().collectLatest { value ->
-                webDavListingSlots = value.coerceIn(WEBDAV_LISTING_MIN, WEBDAV_LISTING_MAX)
+                webDavListingSlots = value.coerceAtLeast(1)
             }
         }
     }
@@ -74,27 +71,27 @@ object ThumbConcurrency {
     /** WebDAV list/PROPFIND slots (Advanced → WebDAV concurrent listing). */
     fun webDavListing(): Int = webDavListingSlots
 
-    /**
-     * SMB browse/video transfer slots: one per configured connection, so a full grid of
-     * new thumbs cannot eat the whole per-host op budget
-     * ([com.hippo.ehviewer.smb.SmbGateway.maxConcurrentOpsPerHost]).
-     */
+    /** SMB browse/video transfer slots: follows the SMB concurrent-connection setting. */
     fun smb(): Int = smbConnections
 
-    /** Video probe budget: whichever network the video lives on allows the most. */
-    fun videoProbe(): Int = maxOf(webDav(), smb())
+    /**
+     * Shared thumbnail/fetch budget: whichever network the user configured highest.
+     * No downward clamp — the settings are the only limit.
+     */
+    fun thumbBudget(): Int = maxOf(webDav(), smb())
+
+    /** Video probe budget. */
+    fun videoProbe(): Int = thumbBudget()
+
+    /** Concurrent native MMR decodes: same setting-derived budget, no memory ceiling knob. */
+    fun videoDecode(): Int = thumbBudget()
 
     /**
-     * Concurrent native MMR decodes. Each decoded frame is a full bitmap, so this stays
-     * below the network budget on purpose — a memory-safety ceiling, not a knob.
+     * Largest budget the settings UI can produce. Used to size fixed-capacity pools
+     * (threads / executors that must cover [thumbBudget] and are built before or
+     * independently of the first flow emission). Not a runtime cap.
      */
-    fun videoDecode(): Int = videoProbe().coerceAtMost(VIDEO_DECODE_MAX)
-
-    /** Upper bound for concurrent native MMR decodes (pool sizing). */
-    val VIDEO_DECODE_MAX = 6
-
-    /** Upper bound for concurrent remote video head/tail probes (pool sizing). */
-    val VIDEO_PROBE_MAX = WEBDAV_MAX.coerceAtLeast(SMB_CONNECTIONS_MAX)
+    val THUMB_BUDGET_MAX = WEBDAV_MAX.coerceAtLeast(SMB_CONNECTIONS_MAX)
 }
 
 /**

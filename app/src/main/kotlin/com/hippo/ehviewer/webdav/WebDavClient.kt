@@ -124,26 +124,13 @@ object WebDavClient {
      */
     private val listSlots = SettingSlots { ThumbConcurrency.webDavListing() }
 
-    private const val DOWNLOAD_SLOTS_MIN = 2
-
     /** Must cover the largest `webdav_download_slots` value in `arrays.xml`. */
     private const val DOWNLOAD_SLOTS_MAX = 10
 
-    private val downloadSlotsLock = Any()
-    private var downloadSlotsCap = -1
-    private var downloadSlots = Semaphore(4)
-
     /** Parallel page / Range GET fan-out. Advanced → WebDAV concurrent downloads. */
-    private fun downloadGate(): Semaphore {
-        val cap = Settings.webDavDownloadSlots.value.coerceIn(DOWNLOAD_SLOTS_MIN, DOWNLOAD_SLOTS_MAX)
-        if (cap == downloadSlotsCap) return downloadSlots
-        synchronized(downloadSlotsLock) {
-            if (cap == downloadSlotsCap) return downloadSlots
-            downloadSlots = Semaphore(cap)
-            downloadSlotsCap = cap
-            return downloadSlots
-        }
-    }
+    private val downloadSlots = SettingSlots { ThumbConcurrency.webDav() }
+
+    private fun downloadGate(): Semaphore = downloadSlots.gate()
 
     /**
      * Dedicated CIO workers with [TrafficStats] tag set for the whole thread lifetime

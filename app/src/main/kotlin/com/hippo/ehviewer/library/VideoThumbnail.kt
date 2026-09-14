@@ -136,8 +136,8 @@ object VideoThumbnail {
      * concurrency is whatever the Advanced network settings allow and submissions are
      * never rejected; threads are created on demand and die when idle.
      */
-    private val DECODE_POOL_THREADS = ThumbConcurrency.VIDEO_DECODE_MAX + MAX_ABANDONED_WORKERS
-    private val PROBE_POOL_THREADS = ThumbConcurrency.VIDEO_PROBE_MAX + MAX_ABANDONED_PROBES
+    private val DECODE_POOL_THREADS = ThumbConcurrency.THUMB_BUDGET_MAX + MAX_ABANDONED_WORKERS
+    private val PROBE_POOL_THREADS = ThumbConcurrency.THUMB_BUDGET_MAX + MAX_ABANDONED_PROBES
 
     /** Fetch probe then close remote. Slightly higher for 8 MiB TS heads. */
     private const val PROBE_IO_TIMEOUT_MS = 8_000L

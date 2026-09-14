@@ -9,6 +9,8 @@ import com.hippo.ehviewer.image.ImageSource
 import com.hippo.ehviewer.image.PathSource
 import com.hippo.ehviewer.image.byteBufferSource
 import com.hippo.ehviewer.image.hdr.HdrConvertCache
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipMemberCover
 import com.hippo.ehviewer.util.FileUtils
@@ -24,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import moe.tarsin.kt.install
 import okio.Path
@@ -47,10 +48,10 @@ suspend inline fun <T> useWebDavFolderPageLoader(
         check(imageFileNames.isNotEmpty()) { "No images in WebDAV folder" }
         val password = WebDavPasswordStore.get(source.id)
         val size = imageFileNames.size
-        val interactiveSlots = Semaphore(10)
-        val prefetchSlots = Semaphore(3)
-        // Cap concurrent lib downloads; full UHDR convert is serial in HdrConvertCache.
-        val libHdrPrefetchSlots = Semaphore(2)
+        // One settings-derived budget for every fetch class — no sub-caps, no reserved lane.
+        val interactiveSlots = SettingSlots { ThumbConcurrency.webDav() }
+        val prefetchSlots = SettingSlots { ThumbConcurrency.webDav() }
+        val libHdrPrefetchSlots = SettingSlots { ThumbConcurrency.webDav() }
         val downloadJobs = KeyedJobRegistry<Int>()
         val readyWaiters = ConcurrentHashMap<Int, CopyOnWriteArrayList<() -> Unit>>()
         val ramPages = ConcurrentHashMap<Int, ByteArray>()
@@ -191,7 +192,7 @@ suspend inline fun <T> useWebDavFolderPageLoader(
                                 isLibHdrCandidate(name) -> libHdrPrefetchSlots
                                 else -> prefetchSlots
                             }
-                            slots.withPermit {
+                            slots.gate().withPermit {
                                 if (skipDisk) {
                                     if (ramPages.containsKey(index) || WebDavCache.isPageCachedOnDisk(cache)) {
                                         dispatchReady(index)

@@ -52,14 +52,19 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal object SmbAsyncTransport {
     /**
-     * Completions for gallery HostPool TCPs. Advanced allows 1 / 3 / 5 sessions;
-     * 5 threads lets a full pool finish SMB3 sign/decrypt without queuing.
+     * Completion threads follow the Advanced settings, exactly as the ops they serve:
+     * browse + video carry [SmbGateway.maxConcurrentOpsPerHost] concurrent ops
+     * (connections × ops/session), list carries the reserved TCP's
+     * [SmbGateway.opsPerSession] slots. No fixed thread counts.
      */
-    private const val BROWSE_GROUP_THREADS = 5
-    private const val LIST_GROUP_THREADS = 2
+    private val BROWSE_GROUP_THREADS: Int get() = SmbGateway.maxConcurrentOpsPerHost()
+
+    private val LIST_GROUP_THREADS: Int get() = SmbGateway.opsPerSession()
 
     /** Extra threads so a leftover close cannot starve the next-file handshake. */
-    private const val VIDEO_GROUP_THREADS = 8
+    private const val VIDEO_GROUP_CONTINGENCY = 2
+
+    private val VIDEO_GROUP_THREADS: Int get() = SmbGateway.maxConcurrentOpsPerHost() + VIDEO_GROUP_CONTINGENCY
 
     /** TCP connect only — matches smbj AsyncDirectTcpTransport's 5s cap. */
     private const val CONNECT_TIMEOUT_MS = 5_000L

@@ -12,9 +12,10 @@ import com.hippo.ehviewer.image.tryHardwareF16FromPixels
 import com.hippo.ehviewer.jni.decodeAvifBytesToDirect
 import com.hippo.ehviewer.jni.decodeJxlBytesToDirect
 import com.hippo.ehviewer.jni.decodeJxrBytesToDirect
+import com.hippo.ehviewer.library.SettingSlots
+import com.hippo.ehviewer.library.ThumbConcurrency
 import java.nio.ByteBuffer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.io.readByteArray
@@ -49,12 +50,12 @@ data class LibDirectResult(
  */
 object LibDirectDecode {
     /**
-     * Full-res RGBA_F16 is ~66 MiB at 3500×2500. Concurrent packs (PageLoader
-     * Semaphore 4 + two pages) blow a 256 MiB Java heap → blocking GC Alloc /
-     * SoftReference thrash. Serialize heavy native→Bitmap work process-wide.
-     * Also used for platform high-depth F16 frames.
+     * Heavy native→Bitmap work process-wide (also used for platform high-depth F16
+     * frames). Width follows the settings ([ThumbConcurrency.thumbBudget]) — no
+     * hardcoded single lane. Note each concurrent full-res RGBA_F16 frame is ~66 MiB
+     * at 3500×2500, so a high setting is a real heap commitment.
      */
-    internal val heavyDecode = Semaphore(1)
+    internal val heavyDecode = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /**
      * ICC type-3 identity (Y = X). [Bitmap.wrapHardwareBuffer] requires this;
@@ -116,7 +117,7 @@ object LibDirectDecode {
         maxEdge: Int = 0,
     ): LibDirectResult? = withContext(Dispatchers.IO) {
         // Gate before allocating native F16 + Java byte[] + Bitmap (~one full frame each).
-        heavyDecode.withPermit {
+        heavyDecode.gate().withPermit {
             decodeUnlocked(src, fileNameHint, maxEdge)
         }
     }
