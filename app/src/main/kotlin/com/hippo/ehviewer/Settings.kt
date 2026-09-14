@@ -77,7 +77,8 @@ object Settings : DataStorePreferences(null) {
     val listMode = intPref("list_mode_2", 1)
 
     /**
-     * Folder browser content filter: 0=Galleries (default), 1=Media, 2=Video, 3=Folder.
+     * Folder browser content filter: 0=Galleries (default), 1=Media, 2=Video, 3=Folder,
+     * 4=FolderGallery.
      * See [com.hippo.ehviewer.library.BrowseContentMode].
      */
     val browseContentMode = intPref("browse_content_mode", 0)

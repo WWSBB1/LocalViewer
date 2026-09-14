@@ -4,7 +4,7 @@ package com.hippo.ehviewer.library
  * Folder-view content filter preset. Scanner always returns the full tagged list;
  * the UI filters instantly (same idea as name search) without re-listing.
  *
- * Pref int: 0=Galleries (default), 1=Media, 2=Video, 3=Folder.
+ * Pref int: 0=Galleries (default), 1=Media, 2=Video, 3=Folder, 4=FolderGallery.
  */
 enum class BrowseContentMode(val prefValue: Int) {
     /** Gallery-related navigation dirs + folder/archive galleries. */
@@ -21,6 +21,12 @@ enum class BrowseContentMode(val prefValue: Int) {
      * (including loose images). Synthetic folder galleries are hidden.
      */
     Folder(3),
+
+    /**
+     * [Folder] listing, except a leaf image folder is listed as its gallery row
+     * (tapping it goes straight to the reader) instead of the enterable dir row.
+     */
+    FolderGallery(4),
     ;
 
     companion object {
@@ -58,6 +64,8 @@ fun DirPresence.visibleIn(
                 )
     // Folder = real FS: hide virtual promoted video dirs (PromotedShell parent stays).
     BrowseContentMode.Folder -> this != DirPresence.PromotedVideoLeaf
+    // Same dir set as Folder; leaf image dirs are dropped later by the gallery collapse.
+    BrowseContentMode.FolderGallery -> this != DirPresence.PromotedVideoLeaf
 }
 
 /**
@@ -72,11 +80,37 @@ fun BrowseEntry.VideoFile.isPromotedVirtual(): Boolean = virtual || name != path
  */
 fun BrowseEntryRemote.VideoFile.isPromotedVirtual(): Boolean = virtual || name != fileName
 
+/**
+ * [BrowseContentMode.FolderGallery] lists only the galleries that stand for a leaf image
+ * dir — the synthetic / dual / promoted rows are dropped here so the main filter can treat
+ * [BrowseEntry.FolderGallery] the same way Folder mode does. No-op for the other modes.
+ */
+private fun List<BrowseEntry>.applyLeafGalleryRule(mode: BrowseContentMode): List<BrowseEntry> {
+    if (mode != BrowseContentMode.FolderGallery) return this
+    val leafDirs = HashSet<String>()
+    for (e in this) {
+        if (e is BrowseEntry.Directory && e.presence == DirPresence.LeafImages) leafDirs += e.name
+    }
+    return filter { it !is BrowseEntry.FolderGallery || (!it.virtual && it.name in leafDirs) }
+}
+
+/** Same as [applyLeafGalleryRule] for remote (SMB / WebDAV) entries. */
+private fun List<BrowseEntryRemote>.applyRemoteLeafGalleryRule(
+    mode: BrowseContentMode,
+): List<BrowseEntryRemote> {
+    if (mode != BrowseContentMode.FolderGallery) return this
+    val leafDirs = HashSet<String>()
+    for (e in this) {
+        if (e is BrowseEntryRemote.Directory && e.presence == DirPresence.LeafImages) leafDirs += e.name
+    }
+    return filter { it !is BrowseEntryRemote.FolderGallery || (!it.virtual && it.name in leafDirs) }
+}
+
 fun List<BrowseEntry>.filterByContentMode(
     mode: BrowseContentMode,
     showHiddenFiles: Boolean = true,
     showVirtualGalleries: Boolean = true,
-): List<BrowseEntry> = filter { e ->
+): List<BrowseEntry> = applyLeafGalleryRule(mode).filter { e ->
     if (!showHiddenFiles && e.hidden) return@filter false
     if (!showVirtualGalleries && e.virtual) return@filter false
     when (mode) {
@@ -113,6 +147,14 @@ fun List<BrowseEntry>.filterByContentMode(
             is BrowseEntry.VideoFile -> !e.virtual
             is BrowseEntry.FolderGallery -> false // synthetic / dual galleries
         }
+        BrowseContentMode.FolderGallery -> when (e) {
+            is BrowseEntry.Directory -> e.presence.visibleIn(mode, e.hasGallery, e.hasVideo)
+            is BrowseEntry.ArchiveGallery, is BrowseEntry.RegularFile -> true
+            is BrowseEntry.VideoFile -> !e.virtual
+            // Leaf-dir galleries only (see [applyLeafGalleryRule]); the matching dir row
+            // goes away in [collapseFolderGalleryDirs] so the folder is not listed twice.
+            is BrowseEntry.FolderGallery -> true
+        }
     }
 }
 
@@ -140,6 +182,43 @@ fun List<BrowseEntry>.filterSmallGalleries(
     }
 }
 
+/**
+ * [BrowseContentMode.FolderGallery] keeps a leaf image dir as its gallery row, so drop the
+ * matching enterable dir row to avoid listing the folder twice.
+ *
+ * Runs **after** [filterSmallGalleries]: a dir whose gallery row was just hidden keeps its
+ * dir row, so Folder reachability is never lost. A leaf dir that also holds videos keeps
+ * its dir row too — the gallery row does not reach them. No-op for the other modes.
+ */
+fun List<BrowseEntry>.collapseFolderGalleryDirs(mode: BrowseContentMode): List<BrowseEntry> {
+    if (mode != BrowseContentMode.FolderGallery) return this
+    val covered = HashSet<String>()
+    for (e in this) if (e is BrowseEntry.FolderGallery) covered += e.name
+    if (covered.isEmpty()) return this
+    return filterNot {
+        it is BrowseEntry.Directory &&
+            it.presence == DirPresence.LeafImages &&
+            !it.hasVideo &&
+            it.name in covered
+    }
+}
+
+/** Same as [collapseFolderGalleryDirs] for remote (SMB / WebDAV) entries. */
+fun List<BrowseEntryRemote>.collapseRemoteFolderGalleryDirs(
+    mode: BrowseContentMode,
+): List<BrowseEntryRemote> {
+    if (mode != BrowseContentMode.FolderGallery) return this
+    val covered = HashSet<String>()
+    for (e in this) if (e is BrowseEntryRemote.FolderGallery) covered += e.name
+    if (covered.isEmpty()) return this
+    return filterNot {
+        it is BrowseEntryRemote.Directory &&
+            it.presence == DirPresence.LeafImages &&
+            !it.hasVideo &&
+            it.name in covered
+    }
+}
+
 /** Same as [filterSmallGalleries] for remote (SMB / WebDAV) entries. */
 fun List<BrowseEntryRemote>.filterRemoteSmallGalleries(
     showSmall: Boolean,
@@ -163,7 +242,7 @@ fun List<BrowseEntryRemote>.filterRemoteByContentMode(
     showVirtualGalleries: Boolean = true,
 ): List<BrowseEntryRemote> {
     val unreachable = cachedUnreachableDirectoryNames(this)
-    return filter { e ->
+    return applyRemoteLeafGalleryRule(mode).filter { e ->
         if (e.isUnderUnreachableFolder(unreachable)) return@filter false
         if (!showHiddenFiles && e.hidden) return@filter false
         if (!showVirtualGalleries && e.virtual) return@filter false
@@ -203,6 +282,15 @@ fun List<BrowseEntryRemote>.filterRemoteByContentMode(
                 -> true
                 is BrowseEntryRemote.VideoFile -> !e.virtual
                 is BrowseEntryRemote.FolderGallery -> false
+            }
+            BrowseContentMode.FolderGallery -> when (e) {
+                is BrowseEntryRemote.Directory -> e.presence.visibleIn(mode, e.hasGallery, e.hasVideo)
+                is BrowseEntryRemote.ArchiveGallery,
+                is BrowseEntryRemote.RegularFile,
+                -> true
+                is BrowseEntryRemote.VideoFile -> !e.virtual
+                // Leaf-dir galleries only — same rule as the local filter.
+                is BrowseEntryRemote.FolderGallery -> true
             }
         }
     }

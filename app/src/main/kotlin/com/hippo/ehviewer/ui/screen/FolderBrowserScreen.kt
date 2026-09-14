@@ -89,6 +89,7 @@ import com.hippo.ehviewer.library.VideoThumbnailSource
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipPaths
 import com.hippo.ehviewer.library.browseScrollLayoutKey
+import com.hippo.ehviewer.library.collapseFolderGalleryDirs
 import com.hippo.ehviewer.library.filterByContentMode
 import com.hippo.ehviewer.library.filterSmallGalleries
 import com.hippo.ehviewer.library.isHtmlFileName
@@ -219,6 +220,7 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                 displayEntries
                     .filterByContentMode(contentMode, showHiddenFiles, showVirtualGalleries)
                     .filterSmallGalleries(showSmallGalleries, smallGalleryMinPages)
+                    .collapseFolderGalleryDirs(contentMode)
         }
         base.filterByBrowseSearch(search.keyword) { it.name }
     }

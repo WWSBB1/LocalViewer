@@ -86,6 +86,7 @@ import com.hippo.ehviewer.library.VideoThumbnail
 import com.hippo.ehviewer.library.VideoThumbnailSource
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.browseScrollLayoutKey
+import com.hippo.ehviewer.library.collapseRemoteFolderGalleryDirs
 import com.hippo.ehviewer.library.filterRemoteByContentMode
 import com.hippo.ehviewer.library.filterRemoteSmallGalleries
 import com.hippo.ehviewer.library.isDocumentFileName
@@ -338,6 +339,7 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                 displayEntries
                     .filterRemoteByContentMode(contentMode, showHiddenFiles, showVirtualGalleries)
                     .filterRemoteSmallGalleries(showSmallGalleries, smallGalleryMinPages)
+                    .collapseRemoteFolderGalleryDirs(contentMode)
         }
         base.filterByBrowseSearch(search.keyword) { it.name }
     }

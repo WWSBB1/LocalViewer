@@ -205,6 +205,16 @@ fun BrowseViewModeMenu(
                         BrowseModePersist.longPress(folder, BrowseContentMode.Folder, skipAncestorKeys)
                     },
                 )
+                ContentModeItem(
+                    label = stringResource(R.string.browse_mode_folder_gallery),
+                    mark = markFor(BrowseContentMode.FolderGallery, contentMode, match?.showLock == true),
+                    onClick = {
+                        BrowseModePersist.tap(folder, BrowseContentMode.FolderGallery, skipAncestorKeys)
+                    },
+                    onLongClick = {
+                        BrowseModePersist.longPress(folder, BrowseContentMode.FolderGallery, skipAncestorKeys)
+                    },
+                )
                 HorizontalDivider()
             }
             ContentModeItem(
