@@ -77,6 +77,7 @@ import com.hippo.ehviewer.library.BrowseSession
 import com.hippo.ehviewer.library.BrowseVirtualKind
 import com.hippo.ehviewer.library.EmptyArchiveRegistry
 import com.hippo.ehviewer.library.FolderGalleryIndex
+import com.hippo.ehviewer.library.HistoryThumbKey
 import com.hippo.ehviewer.library.LOCAL_FOLDER_TOKEN
 import com.hippo.ehviewer.library.LOCAL_GALLERY_TOKEN
 import com.hippo.ehviewer.library.LocalFolderListing
@@ -260,7 +261,11 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
         val frame = stack.lastOrNull() ?: return
         val rel = if (frame.relativePath.isEmpty()) dir.name else "${frame.relativePath}/${dir.name}"
         // Same cache-key idea as History: absolute cover path for Library fav cell.
-        BrowseFavorites.toggleLocalFolder(frame.rootId, rel, thumbKey = dir.coverPath?.toString())
+        // No image in the folder → cache-only video frame key (same as its browse cover).
+        val thumbKey = dir.coverPath?.toString()
+            ?: dir.coverVideoPath?.let { HistoryThumbKey.videoLocal(it.toString()) }
+            ?: dir.coverArchivePath?.let { HistoryThumbKey.localArchive(it.toString()) }
+        BrowseFavorites.toggleLocalFolder(frame.rootId, rel, thumbKey = thumbKey)
     }
 
     fun isDirFavorite(dir: BrowseEntry.Directory): Boolean {
@@ -1653,7 +1658,9 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                                             onClick = { enterDir(dir) },
                                             onLongClick = { toggleDirFavorite(dir) },
                                             showFavoriteStar = isDirFavorite(dir),
-                                            cover = dir.coverPath?.let { BrowseCover.Local(it) },
+                                            cover = dir.coverPath?.let { BrowseCover.Local(it) }
+                                                ?: dir.coverVideoPath?.let { BrowseCover.LocalVideo(it) }
+                                                ?: dir.coverArchivePath?.let { BrowseCover.LocalArchive(it) },
                                             showFolderThumb = browseFolderThumbs,
                                             overflow = dirOverflow(dir),
                                         )
@@ -1794,7 +1801,9 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                                             name = dir.name,
                                             onClick = { enterDir(dir) },
                                             onLongClick = { toggleDirFavorite(dir) },
-                                            cover = dir.coverPath?.let { BrowseCover.Local(it) },
+                                            cover = dir.coverPath?.let { BrowseCover.Local(it) }
+                                                ?: dir.coverVideoPath?.let { BrowseCover.LocalVideo(it) }
+                                                ?: dir.coverArchivePath?.let { BrowseCover.LocalArchive(it) },
                                             showFolderThumb = browseFolderThumbs,
                                             lastModifiedMs = dir.lastModifiedMs,
                                             overflow = dirOverflow(dir),

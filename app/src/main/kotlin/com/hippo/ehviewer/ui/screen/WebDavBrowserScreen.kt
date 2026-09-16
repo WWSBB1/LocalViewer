@@ -247,7 +247,12 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
 
     fun dirRelative(name: String): String = if (relativeDir.isEmpty()) name else WebDavGateway.joinRelative(relativeDir, name)
 
-    fun toggleDirFavorite(name: String, coverFileName: String? = null) {
+    fun toggleDirFavorite(
+        name: String,
+        coverFileName: String? = null,
+        coverVideoFileName: String? = null,
+        coverArchiveFileName: String? = null,
+    ) {
         val rel = dirRelative(name)
         val coverKey = coverFileName?.let { fileName ->
             val coverRemote = if (rel.isEmpty()) {
@@ -256,6 +261,15 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 WebDavGateway.joinRelative(rel, fileName)
             }
             HistoryThumbKey.webdav(sourceId, coverRemote)
+        } ?: coverVideoFileName?.let { video ->
+            // Folder holds no image → cached video frame (same key as its browse cover).
+            val videoRemote = if (rel.isEmpty()) video else WebDavGateway.joinRelative(rel, video)
+            HistoryThumbKey.videoWebdav(sourceId, videoRemote)
+        } ?: coverArchiveFileName?.let { archive ->
+            // Neither image nor video → cached archive first page.
+            val archiveRemote =
+                if (rel.isEmpty()) archive else WebDavGateway.joinRelative(rel, archive)
+            HistoryThumbKey.webdavArchive(sourceId, archiveRemote)
         }
         BrowseFavorites.toggleWebDavFolder(sourceId, rel, thumbKey = coverKey)
     }
@@ -1390,12 +1404,26 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                     }
                     fun dirCoverFor(dir: BrowseEntryRemote.Directory): BrowseCover? {
                         zipMemberCover(dir.relativeName, dir.coverFileName)?.let { return it }
-                        val fileName = dir.coverFileName ?: return null
-                        val remote = WebDavGateway.joinRelative(
-                            WebDavGateway.joinRelative(relativeDir, dir.relativeName),
-                            fileName,
+                        val dirRemote = WebDavGateway.joinRelative(relativeDir, dir.relativeName)
+                        dir.coverFileName?.let { fileName ->
+                            return BrowseCover.WebDav(
+                                sourceId,
+                                WebDavGateway.joinRelative(dirRemote, fileName),
+                            )
+                        }
+                        // No image in this folder → first video frame (coverVideoFileName).
+                        dir.coverVideoFileName?.let { video ->
+                            return BrowseCover.WebDavVideo(
+                                sourceId,
+                                WebDavGateway.joinRelative(dirRemote, video),
+                            )
+                        }
+                        // Neither image nor video → archive first page (coverArchiveFileName).
+                        val archive = dir.coverArchiveFileName ?: return null
+                        return BrowseCover.WebDavArchive(
+                            sourceId,
+                            WebDavGateway.joinRelative(dirRemote, archive),
                         )
-                        return BrowseCover.WebDav(sourceId, remote)
                     }
                     fun archiveCoverFor(entry: BrowseEntryRemote.ArchiveGallery): BrowseCover? {
                         // ZIP/TAR/EPUB stream + solid RAR/7z + documents.
@@ -1476,7 +1504,12 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                             name = dir.name,
                                             onClick = { enterDir(dir.relativeName) },
                                             onLongClick = {
-                                                toggleDirFavorite(dir.relativeName, dir.coverFileName)
+                                                toggleDirFavorite(
+                                                    dir.relativeName,
+                                                    dir.coverFileName,
+                                                    dir.coverVideoFileName,
+                                                    dir.coverArchiveFileName,
+                                                )
                                             },
                                             showFavoriteStar = isDirFavorite(dir.relativeName),
                                             cover = dirCoverFor(dir),
@@ -1620,7 +1653,12 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                             name = dir.name,
                                             onClick = { enterDir(dir.relativeName) },
                                             onLongClick = {
-                                                toggleDirFavorite(dir.relativeName, dir.coverFileName)
+                                                toggleDirFavorite(
+                                                    dir.relativeName,
+                                                    dir.coverFileName,
+                                                    dir.coverVideoFileName,
+                                                    dir.coverArchiveFileName,
+                                                )
                                             },
                                             cover = dirCoverFor(dir),
                                             showFolderThumb = browseFolderThumbs,

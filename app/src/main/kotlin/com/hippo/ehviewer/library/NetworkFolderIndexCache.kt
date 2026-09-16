@@ -40,7 +40,7 @@ import splitties.init.appCtx
  */
 object NetworkFolderIndexCache {
     /** Bump when on-disk entry shape changes — old JSON is ignored (no migration). */
-    private const val VERSION = 5
+    private const val VERSION = 6
     private const val KIND_DIRECTORY = "directory"
     private const val KIND_FOLDER_GALLERY = "folder_gallery"
     private const val KIND_ARCHIVE = "archive"
@@ -468,6 +468,8 @@ object NetworkFolderIndexCache {
                             put("hasGallery", entry.hasGallery)
                             put("presence", entry.presence.name)
                             entry.coverFileName?.let { put("coverFileName", it) }
+                            entry.coverVideoFileName?.let { put("coverVideoFileName", it) }
+                            entry.coverArchiveFileName?.let { put("coverArchiveFileName", it) }
                             if (entry.lastModifiedMs > 0L) put("lastModifiedMs", entry.lastModifiedMs)
                             if (entry.size > 0L) put("size", entry.size)
                             if (entry.unreachable) put("unreachable", true)
@@ -522,6 +524,8 @@ object NetworkFolderIndexCache {
                         hasGallery = item.optBoolean("hasGallery"),
                         presence = DirPresence.valueOf(item.getString("presence")),
                         coverFileName = item.optNullableString("coverFileName"),
+                        coverVideoFileName = item.optNullableString("coverVideoFileName"),
+                        coverArchiveFileName = item.optNullableString("coverArchiveFileName"),
                         lastModifiedMs = item.optLong("lastModifiedMs"),
                         size = item.optLong("size"),
                         hidden = hidden,

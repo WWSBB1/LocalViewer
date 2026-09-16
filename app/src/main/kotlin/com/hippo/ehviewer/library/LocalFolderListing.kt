@@ -703,6 +703,16 @@ fun materializeLocalEntries(
                     hasGallery = entry.hasGallery,
                     presence = entry.presence,
                     coverPath = cover,
+                    // Video fallback only for real folders — zip-as-dir members are not
+                    // extractable as a video here (cover stays null → folder icon).
+                    coverVideoPath = entry.coverVideoFileName?.let { videoRel ->
+                        if (zipSeg != null) null else path.resolveRelative(videoRel)
+                    },
+                    // Archive fallback for e.g. a folder of .cbz volumes. Zip-as-dir
+                    // members are skipped for the same reason as the video fallback.
+                    coverArchivePath = entry.coverArchiveFileName?.let { archiveRel ->
+                        if (zipSeg != null) null else path.resolveRelative(archiveRel)
+                    },
                     lastModifiedMs = entry.lastModifiedMs,
                     hidden = entry.hidden,
                     virtual = entry.virtual,

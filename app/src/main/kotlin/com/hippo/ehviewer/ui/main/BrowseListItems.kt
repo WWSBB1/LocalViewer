@@ -1,5 +1,6 @@
 package com.hippo.ehviewer.ui.main
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -93,6 +94,7 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import okio.Path
+import okio.Path.Companion.toPath
 
 private const val BROWSE_LIST_SEP = " · "
 
@@ -240,6 +242,15 @@ sealed class BrowseCover {
         val zipRelativeFile: String,
         val memberRel: String,
     ) : BrowseCover()
+
+    /**
+     * Folder video-cover fallback: the folder holds no image, so the cover is frame 0 of
+     * its first video. Resolved through [VideoThumbnail] (its own disk cache / LRU), not
+     * the still-picture pipeline. Mirrors [VideoThumbnailSource.Local]/[Smb]/[WebDav].
+     */
+    data class LocalVideo(val path: Path) : BrowseCover()
+    data class SmbVideo(val sourceId: Long, val remoteRelativeFile: String) : BrowseCover()
+    data class WebDavVideo(val sourceId: Long, val remoteRelativeFile: String) : BrowseCover()
 }
 
 /**
@@ -1175,6 +1186,9 @@ fun BrowseCoverThumb(
             "davz\u0000${cover.sourceId}\u0000${cover.zipRelativeFile}\u0000${cover.memberRel}"
         is BrowseCover.LocalArchive -> "arch\u0000${cover.archivePath}"
         is BrowseCover.Local -> "local\u0000${cover.path}"
+        is BrowseCover.LocalVideo -> "vidl\u0000${cover.path}"
+        is BrowseCover.SmbVideo -> "vids\u0000${cover.sourceId}\u0000${cover.remoteRelativeFile}"
+        is BrowseCover.WebDavVideo -> "vidd\u0000${cover.sourceId}\u0000${cover.remoteRelativeFile}"
         null -> null
     }
     // Local image paths set immediately. Archive/network thumbs: never trust main-thread
@@ -1190,6 +1204,9 @@ fun BrowseCoverThumb(
                 is BrowseCover.WebDavZipMember,
                 is BrowseCover.Smb,
                 is BrowseCover.WebDav,
+                is BrowseCover.LocalVideo,
+                is BrowseCover.SmbVideo,
+                is BrowseCover.WebDavVideo,
                 null,
                 -> null
             },
@@ -1559,6 +1576,33 @@ fun BrowseCoverThumb(
                     fetchFailed = localPath == null
                 }
             }
+            is BrowseCover.LocalVideo -> {
+                videoCoverFrame(context, VideoThumbnailSource.Local(cover.path.toString()), allowRemoteFetch)
+                    ?.let { frame ->
+                        localPath = frame.absolutePath.toPath()
+                        fetchFailed = false
+                    }
+            }
+            is BrowseCover.SmbVideo -> {
+                videoCoverFrame(
+                    context,
+                    VideoThumbnailSource.Smb(cover.sourceId, cover.remoteRelativeFile),
+                    allowRemoteFetch,
+                )?.let { frame ->
+                    localPath = frame.absolutePath.toPath()
+                    fetchFailed = false
+                }
+            }
+            is BrowseCover.WebDavVideo -> {
+                videoCoverFrame(
+                    context,
+                    VideoThumbnailSource.WebDav(cover.sourceId, cover.remoteRelativeFile),
+                    allowRemoteFetch,
+                )?.let { frame ->
+                    localPath = frame.absolutePath.toPath()
+                    fetchFailed = false
+                }
+            }
             else -> return@LaunchedEffect
         }
     }
@@ -1582,6 +1626,9 @@ fun BrowseCoverThumb(
                 is BrowseCover.WebDavZipMember ->
                     "davz-thumb:${cover.sourceId}:${cover.zipRelativeFile}!${cover.memberRel}@${WebDavCache.THUMB_DISK_EDGE}"
                 is BrowseCover.Local -> cover.path.toString()
+                is BrowseCover.LocalVideo -> "vidl-thumb:${cover.path}"
+                is BrowseCover.SmbVideo -> "vids-thumb:${cover.sourceId}:${cover.remoteRelativeFile}"
+                is BrowseCover.WebDavVideo -> "vidd-thumb:${cover.sourceId}:${cover.remoteRelativeFile}"
                 null -> path.toString()
             }
             with(context) {
@@ -1614,6 +1661,25 @@ fun BrowseCoverThumb(
                 contentScale = ContentScale.Crop,
             )
         }
+    }
+}
+
+/**
+ * Folder video-cover fallback: frame 0 of [source] from [VideoThumbnail]'s own disk cache.
+ *
+ * Mirrors [BrowseVideoThumbnail]: a cached frame always wins (works offline / with
+ * download off). Extraction happens only when [allowFetch] — the network toggle
+ * ([Settings.downloadNetworkVideoThumbs]) is enforced inside [VideoThumbnail.getOrCreate].
+ */
+private suspend fun videoCoverFrame(
+    context: Context,
+    source: VideoThumbnailSource,
+    allowFetch: Boolean,
+): java.io.File? = withIOContext {
+    VideoThumbnail.cachedJpegIfPresent(source) ?: if (allowFetch) {
+        VideoThumbnail.getOrCreate(context, source)
+    } else {
+        null
     }
 }
 

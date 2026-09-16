@@ -282,7 +282,12 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
 
     fun dirRelative(name: String): String = if (relativeDir.isEmpty()) name else SmbGateway.joinRelativePath(relativeDir, name)
 
-    fun toggleDirFavorite(name: String, coverFileName: String? = null) {
+    fun toggleDirFavorite(
+        name: String,
+        coverFileName: String? = null,
+        coverVideoFileName: String? = null,
+        coverArchiveFileName: String? = null,
+    ) {
         val rel = dirRelative(name)
         val coverKey = coverFileName?.let { fileName ->
             val coverRemote = if (rel.isEmpty()) {
@@ -291,6 +296,15 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                 SmbGateway.joinRelativePath(rel, fileName)
             }
             HistoryThumbKey.smb(sourceId, coverRemote)
+        } ?: coverVideoFileName?.let { video ->
+            // Folder holds no image → cached video frame (same key as its browse cover).
+            val videoRemote = if (rel.isEmpty()) video else SmbGateway.joinRelativePath(rel, video)
+            HistoryThumbKey.videoSmb(sourceId, videoRemote)
+        } ?: coverArchiveFileName?.let { archive ->
+            // Neither image nor video → cached archive first page.
+            val archiveRemote =
+                if (rel.isEmpty()) archive else SmbGateway.joinRelativePath(rel, archive)
+            HistoryThumbKey.smbArchive(sourceId, archiveRemote)
         }
         BrowseFavorites.toggleSmbFolder(sourceId, rel, thumbKey = coverKey)
     }
@@ -1515,12 +1529,26 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                     }
                     fun dirCoverFor(dir: BrowseEntryRemote.Directory): BrowseCover? {
                         zipMemberCover(dir.relativeName, dir.coverFileName)?.let { return it }
-                        val fileName = dir.coverFileName ?: return null
-                        val remote = SmbGateway.joinRelativePath(
-                            SmbGateway.joinRelativePath(relativeDir, dir.relativeName),
-                            fileName,
+                        val dirRemote = SmbGateway.joinRelativePath(relativeDir, dir.relativeName)
+                        dir.coverFileName?.let { fileName ->
+                            return BrowseCover.Smb(
+                                sourceId,
+                                SmbGateway.joinRelativePath(dirRemote, fileName),
+                            )
+                        }
+                        // No image in this folder → first video frame (coverVideoFileName).
+                        dir.coverVideoFileName?.let { video ->
+                            return BrowseCover.SmbVideo(
+                                sourceId,
+                                SmbGateway.joinRelativePath(dirRemote, video),
+                            )
+                        }
+                        // Neither image nor video → archive first page (coverArchiveFileName).
+                        val archive = dir.coverArchiveFileName ?: return null
+                        return BrowseCover.SmbArchive(
+                            sourceId,
+                            SmbGateway.joinRelativePath(dirRemote, archive),
                         )
-                        return BrowseCover.Smb(sourceId, remote)
                     }
                     fun archiveCoverFor(entry: BrowseEntryRemote.ArchiveGallery): BrowseCover? {
                         // ZIP/TAR/EPUB stream + solid RAR/7z + documents (lazy first-page extract).
@@ -1602,7 +1630,12 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                                             name = dir.name,
                                             onClick = { enterDir(dir.relativeName) },
                                             onLongClick = {
-                                                toggleDirFavorite(dir.relativeName, dir.coverFileName)
+                                                toggleDirFavorite(
+                                                    dir.relativeName,
+                                                    dir.coverFileName,
+                                                    dir.coverVideoFileName,
+                                                    dir.coverArchiveFileName,
+                                                )
                                             },
                                             showFavoriteStar = isDirFavorite(dir.relativeName),
                                             cover = dirCoverFor(dir),
@@ -1747,7 +1780,12 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                                             name = dir.name,
                                             onClick = { enterDir(dir.relativeName) },
                                             onLongClick = {
-                                                toggleDirFavorite(dir.relativeName, dir.coverFileName)
+                                                toggleDirFavorite(
+                                                    dir.relativeName,
+                                                    dir.coverFileName,
+                                                    dir.coverVideoFileName,
+                                                    dir.coverArchiveFileName,
+                                                )
                                             },
                                             cover = dirCoverFor(dir),
                                             showFolderThumb = browseFolderThumbs,

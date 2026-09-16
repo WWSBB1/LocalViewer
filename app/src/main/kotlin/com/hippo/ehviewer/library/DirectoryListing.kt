@@ -88,6 +88,18 @@ sealed interface BrowseEntry {
          * from a single first-leaf peek (at most 10 entries). Null if none.
          */
         val coverPath: Path? = null,
+        /**
+         * Video-cover fallback when [coverPath] is null: first browse video in this
+         * folder. The UI extracts frame 0 via [VideoThumbnail] instead of loading it
+         * as a picture. Never set together with [coverPath].
+         */
+        val coverVideoPath: Path? = null,
+        /**
+         * Archive-cover fallback when [coverPath] and [coverVideoPath] are both null:
+         * first archive in this folder. The UI shows its first page via
+         * [ArchiveCoverCache]. Never set together with the other two.
+         */
+        val coverArchivePath: Path? = null,
         override val lastModifiedMs: Long = 0L,
         override val hidden: Boolean = false,
         override val virtual: Boolean = false,
@@ -286,6 +298,20 @@ sealed interface BrowseEntryRemote {
          * direct child, or `leaf/file.jpg` when promoted from a ≤3-leaf grand peek.
          */
         val coverFileName: String? = null,
+        /**
+         * Video-cover fallback for folders that hold **no** image at all: first
+         * browse video relative to this directory, same `leaf/x.mp4` shape as
+         * [coverFileName]. Only set when [coverFileName] is null; the UI extracts
+         * frame 0 through [VideoThumbnail] instead of loading a picture.
+         */
+        val coverVideoFileName: String? = null,
+        /**
+         * Archive-cover fallback, last in the image → video → archive order: first
+         * archive relative to this directory, same `leaf/x.cbz` shape as [coverFileName].
+         * Only set when the folder has neither an image nor a browse video; the UI shows
+         * the archive's first page through [ArchiveCoverCache].
+         */
+        val coverArchiveFileName: String? = null,
         override val lastModifiedMs: Long = 0L,
         override val size: Long = 0L,
         override val hidden: Boolean = false,
@@ -1026,6 +1052,19 @@ fun classifyRemoteListingWithPeeks(
                     var leafHasGallery = false
                     // Folder-thumb cover for real dir S (direct image or first leaf image).
                     val sCoverFileName = remoteDirCoverFileName(peek, e.name, leaves, grandPeeks)
+                    // No image anywhere in S → fall back to the first video frame.
+                    val sCoverVideoFileName = if (sCoverFileName == null) {
+                        remoteDirCoverVideoFileName(peek, e.name, leaves, grandPeeks)
+                    } else {
+                        null
+                    }
+                    // Neither image nor video → last resort: first archive's first page.
+                    val sCoverArchiveFileName =
+                        if (sCoverFileName == null && sCoverVideoFileName == null) {
+                            remoteDirCoverArchiveFileName(peek, e.name, leaves, grandPeeks)
+                        } else {
+                            null
+                        }
                     val sHasImages = peek.any {
                         !it.isDirectory && !it.name.startsWith('.') &&
                             !isProtectedSystemName(it.name) && isImageFileName(it.name)
@@ -1205,6 +1244,8 @@ fun classifyRemoteListingWithPeeks(
                             hasGallery = sHasGalleryFlag,
                             presence = presence,
                             coverFileName = sCoverFileName,
+                            coverVideoFileName = sCoverVideoFileName,
+                            coverArchiveFileName = sCoverArchiveFileName,
                             lastModifiedMs = e.lastModifiedMs,
                             hidden = entryHidden,
                         )
@@ -1228,6 +1269,8 @@ fun classifyRemoteListingWithPeeks(
                                 hasGallery = true,
                                 presence = DirPresence.LeafImages,
                                 coverFileName = sCoverFileName,
+                                coverVideoFileName = sCoverVideoFileName,
+                                coverArchiveFileName = sCoverArchiveFileName,
                                 lastModifiedMs = e.lastModifiedMs,
                                 hidden = entryHidden,
                             )
@@ -1239,6 +1282,8 @@ fun classifyRemoteListingWithPeeks(
                                 hasGallery = false,
                                 presence = DirPresence.VideoOnly,
                                 coverFileName = sCoverFileName,
+                                coverVideoFileName = sCoverVideoFileName,
+                                coverArchiveFileName = sCoverArchiveFileName,
                                 lastModifiedMs = e.lastModifiedMs,
                                 hidden = entryHidden,
                             )
@@ -1250,6 +1295,8 @@ fun classifyRemoteListingWithPeeks(
                                 hasGallery = false,
                                 presence = DirPresence.Empty,
                                 coverFileName = sCoverFileName,
+                                coverVideoFileName = sCoverVideoFileName,
+                                coverArchiveFileName = sCoverArchiveFileName,
                                 lastModifiedMs = e.lastModifiedMs,
                                 hidden = entryHidden,
                             )
@@ -1276,6 +1323,8 @@ fun classifyRemoteListingWithPeeks(
                         hasGallery = sHasGalleryFlag,
                         presence = DirPresence.Navigable,
                         coverFileName = sCoverFileName,
+                        coverVideoFileName = sCoverVideoFileName,
+                        coverArchiveFileName = sCoverArchiveFileName,
                         lastModifiedMs = e.lastModifiedMs,
                         hidden = entryHidden,
                     )
@@ -1286,12 +1335,25 @@ fun classifyRemoteListingWithPeeks(
                     is RemoteChildKind.Navigable -> {
                         // Direct image, else first-leaf cover (including >3-leaf fallback peek).
                         val navCover = remoteDirCoverFileName(peek, e.name, leaves, grandPeeks)
+                        val navCoverVideo = if (navCover == null) {
+                            remoteDirCoverVideoFileName(peek, e.name, leaves, grandPeeks)
+                        } else {
+                            null
+                        }
+                        // Archive-only folder (e.g. a shelf of .cbz volumes) → first page.
+                        val navCoverArchive = if (navCover == null && navCoverVideo == null) {
+                            remoteDirCoverArchiveFileName(peek, e.name, leaves, grandPeeks)
+                        } else {
+                            null
+                        }
                         dirs += BrowseEntryRemote.Directory(
                             name = e.name,
                             hasVideo = kind.hasVideo,
                             hasGallery = kind.hasGallery,
                             presence = DirPresence.Navigable,
                             coverFileName = navCover,
+                            coverVideoFileName = navCoverVideo,
+                            coverArchiveFileName = navCoverArchive,
                             lastModifiedMs = e.lastModifiedMs,
                             hidden = entryHidden,
                         )
@@ -1380,6 +1442,8 @@ fun classifyRemoteListingWithPeeks(
                                     hasVideo = true,
                                     hasGallery = false,
                                     presence = DirPresence.VideoOnly,
+                                    // No image in this folder → cover from its first video.
+                                    coverVideoFileName = firstVideoNameInPeek(peek),
                                     lastModifiedMs = e.lastModifiedMs,
                                     hidden = entryHidden,
                                 )
@@ -1520,6 +1584,35 @@ private fun firstImageNameInPeek(peek: List<RemoteChild>): String? {
 }
 
 /**
+ * First browse-video basename in a one-level peek — image-cover fallback for folders
+ * that hold no image. Uses the same predicate as the Videos section
+ * ([isBrowseVideoEntry]), so `sample-*` previews never become a folder cover.
+ */
+private fun firstVideoNameInPeek(peek: List<RemoteChild>): String? {
+    for (c in peek) {
+        if (c.isDirectory || c.name.startsWith('.') || isProtectedSystemName(c.name)) continue
+        if (isBrowseVideoEntry(c.name, c.mimeType)) return c.name
+    }
+    return null
+}
+
+/**
+ * First archive basename in a one-level peek — the last-resort folder cover for folders
+ * holding neither an image nor a browse video.
+ *
+ * [isArchiveFileName] is exactly the set [ArchiveCoverCache] can turn into a first-page
+ * thumb (ZIP/CBZ/TAR/CBT/EPUB stream, solid RAR/CBR/7z, PDF/EPUB documents), so a folder
+ * of archive volumes always yields a cover candidate.
+ */
+private fun firstArchiveNameInPeek(peek: List<RemoteChild>): String? {
+    for (c in peek) {
+        if (c.isDirectory || c.name.startsWith('.') || isProtectedSystemName(c.name)) continue
+        if (isArchiveFileName(c.name)) return c.name
+    }
+    return null
+}
+
+/**
  * Folder-thumb cover relative to dir S: direct image basename, else first image from
  * leaf grand-peeks as `leafName/file.jpg` (scan order of [leaves]).
  *
@@ -1542,6 +1635,56 @@ private fun remoteDirCoverFileName(
     for (leaf in leavesToCheck) {
         val leafPeek = grandPeeks["$parentName/${leaf.name}"].orEmpty()
         firstImageNameInPeek(leafPeek)?.let { return "${leaf.name}/$it" }
+    }
+    return null
+}
+
+/**
+ * Video counterpart of [remoteDirCoverFileName], used only when no image cover exists
+ * (see [BrowseEntryRemote.Directory.coverVideoFileName]): direct browse video basename,
+ * else first video from the same leaf grand-peeks as `leafName/x.mp4`.
+ */
+private fun remoteDirCoverVideoFileName(
+    peek: List<RemoteChild>,
+    parentName: String,
+    leaves: List<RemoteChild>,
+    grandPeeks: Map<String, List<RemoteChild>>,
+): String? {
+    firstVideoNameInPeek(peek)?.let { return it }
+    if (leaves.isEmpty()) return null
+    val leavesToCheck = if (leaves.size in 1..SMB_PROMOTE_MAX_LEAVES) {
+        leaves
+    } else {
+        listOf(leaves.first())
+    }
+    for (leaf in leavesToCheck) {
+        val leafPeek = grandPeeks["$parentName/${leaf.name}"].orEmpty()
+        firstVideoNameInPeek(leafPeek)?.let { return "${leaf.name}/$it" }
+    }
+    return null
+}
+
+/**
+ * Archive counterpart of [remoteDirCoverFileName], used only when the folder has neither
+ * an image nor a browse video (see [BrowseEntryRemote.Directory.coverArchiveFileName]):
+ * direct archive basename, else first archive from the same leaf grand-peeks.
+ */
+private fun remoteDirCoverArchiveFileName(
+    peek: List<RemoteChild>,
+    parentName: String,
+    leaves: List<RemoteChild>,
+    grandPeeks: Map<String, List<RemoteChild>>,
+): String? {
+    firstArchiveNameInPeek(peek)?.let { return it }
+    if (leaves.isEmpty()) return null
+    val leavesToCheck = if (leaves.size in 1..SMB_PROMOTE_MAX_LEAVES) {
+        leaves
+    } else {
+        listOf(leaves.first())
+    }
+    for (leaf in leavesToCheck) {
+        val leafPeek = grandPeeks["$parentName/${leaf.name}"].orEmpty()
+        firstArchiveNameInPeek(leafPeek)?.let { return "${leaf.name}/$it" }
     }
     return null
 }

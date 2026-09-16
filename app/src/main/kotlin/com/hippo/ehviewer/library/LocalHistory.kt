@@ -472,12 +472,17 @@ object LocalHistory {
         val rel = normalizeRel(relativePath)
         if (rel.isNotEmpty() && !parentPath.isNullOrEmpty()) {
             val dirName = rel.substringAfterLast('/')
-            BrowseSession.getLocalListing(parentPath)
+            val parentDir = BrowseSession.getLocalListing(parentPath)
                 ?.asSequence()
                 ?.filterIsInstance<BrowseEntry.Directory>()
                 ?.firstOrNull { it.path.toString() == currentPath || it.name == dirName }
-                ?.coverPath?.toString()?.takeIf { it.isNotBlank() }
-                ?.let { return it }
+            parentDir?.coverPath?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+            // Folder holds no image → cached video frame (same key shape as its browse cover).
+            parentDir?.coverVideoPath?.toString()?.takeIf { it.isNotBlank() }
+                ?.let { return HistoryThumbKey.videoLocal(it) }
+            // Neither image nor video → cached archive first page.
+            parentDir?.coverArchivePath?.toString()?.takeIf { it.isNotBlank() }
+                ?.let { return HistoryThumbKey.localArchive(it) }
         }
 
         return BrowseFavorites.thumbKeyFor(BrowseFavorites.localFolderKey(rootId, rel))
@@ -531,10 +536,11 @@ object LocalHistory {
             } else {
                 BrowseSession.getWebDavListing(sourceId, parentRel)
             }
-            parentListing
+            val parentDir = parentListing
                 ?.asSequence()
                 ?.filterIsInstance<BrowseEntryRemote.Directory>()
                 ?.firstOrNull { joinRemote(parentRel, it.relativeName) == rel }
+            parentDir
                 ?.coverFileName?.takeIf { it.isNotBlank() }
                 ?.let { fileName ->
                     return zipOrRemoteThumbKey(
@@ -544,6 +550,29 @@ object LocalHistory {
                         fileName,
                         smb,
                     )
+                }
+            // Folder holds no image → cached video frame (same key shape as its browse cover).
+            parentDir
+                ?.coverVideoFileName?.takeIf { it.isNotBlank() }
+                ?.let { video ->
+                    // [rel] is already the folder's full path; video sits directly inside it.
+                    val remote = joinRemote(rel, video)
+                    return if (smb) {
+                        HistoryThumbKey.videoSmb(sourceId, remote)
+                    } else {
+                        HistoryThumbKey.videoWebdav(sourceId, remote)
+                    }
+                }
+            // Neither image nor video → cached archive first page.
+            parentDir
+                ?.coverArchiveFileName?.takeIf { it.isNotBlank() }
+                ?.let { archive ->
+                    val remote = joinRemote(rel, archive)
+                    return if (smb) {
+                        HistoryThumbKey.smbArchive(sourceId, remote)
+                    } else {
+                        HistoryThumbKey.webdavArchive(sourceId, remote)
+                    }
                 }
         }
 

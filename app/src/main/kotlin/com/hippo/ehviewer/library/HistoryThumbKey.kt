@@ -2,6 +2,7 @@ package com.hippo.ehviewer.library
 
 import com.hippo.ehviewer.smb.SmbCache
 import com.hippo.ehviewer.webdav.WebDavCache
+import java.io.File
 import okio.Path
 import okio.Path.Companion.toPath
 
@@ -31,6 +32,7 @@ object HistoryThumbKey {
     private const val VID_LOCAL_PREFIX = "vid-local:"
     private const val VID_SMB_PREFIX = "vid-smb:"
     private const val VID_DAV_PREFIX = "vid-dav:"
+    private const val LOCAL_ARCH_PREFIX = "arch-local:"
 
     fun smb(sourceId: Long, remoteRelativeFile: String): String {
         val remote = remoteRelativeFile.replace('\\', '/').trimStart('/')
@@ -79,6 +81,13 @@ object HistoryThumbKey {
         return "$VID_DAV_PREFIX$sourceId:$remote"
     }
 
+    /**
+     * Local archive folder-thumb cover (first page, [ArchiveCoverCache] `archive_thumb`).
+     * Stores the **archive path**, not the cover file — the cover dest is
+     * mtime/size-dependent, so it is resolved on read (IO) by [resolveReadablePath].
+     */
+    fun localArchive(archivePath: String): String = "$LOCAL_ARCH_PREFIX$archivePath"
+
     /** Browse/reader [ArchiveCoverCache] key for a network archive logical thumb key. */
     fun archiveCacheKey(key: String): String? = when {
         key.startsWith(SMB_ARCH_PREFIX) -> {
@@ -101,6 +110,7 @@ object HistoryThumbKey {
         key.startsWith(VID_LOCAL_PREFIX) ||
         key.startsWith(VID_SMB_PREFIX) ||
         key.startsWith(VID_DAV_PREFIX) ||
+        key.startsWith(LOCAL_ARCH_PREFIX) ||
         ZipPaths.isZipPath(key)
 
     /**
@@ -162,6 +172,10 @@ object HistoryThumbKey {
                     VideoThumbnailSource.WebDav(sourceId, remote),
                 )?.absolutePath
             }
+            key.startsWith(LOCAL_ARCH_PREFIX) -> {
+                val dest = localArchiveCoverDest(key.removePrefix(LOCAL_ARCH_PREFIX)) ?: return null
+                return ArchiveCoverCache.cachedCoverIfPresent(dest)?.toString()
+            }
             else -> {
                 ZipPaths.parse(key)?.let { return key }
                 // Local path / content URI / archive_thumb absolute path.
@@ -216,6 +230,9 @@ object HistoryThumbKey {
                 return VideoThumbnail.cachedJpegIfPresent(VideoThumbnailSource.WebDav(sourceId, remote))
                     ?.absolutePath?.toPath()
             }
+            key.startsWith(LOCAL_ARCH_PREFIX) -> {
+                return localArchiveCoverDest(key.removePrefix(LOCAL_ARCH_PREFIX))
+            }
             else -> {
                 ZipPaths.parse(key)?.let { (zip, member) ->
                     return ZipMemberCover.destFile(zip, member).absolutePath.toPath()
@@ -223,6 +240,25 @@ object HistoryThumbKey {
                 return null
             }
         }
+    }
+
+    /**
+     * Cover destination for a local archive folder thumb, or null when the path is empty.
+     *
+     * [ArchiveCoverCache] keys local ZIP/TAR by real mtime+size ([ArchiveCoverCache.ensureCover]),
+     * so the same hints must be replayed or the resolved path misses the thumb that was
+     * actually written. Solid/document formats force 0/0 inside the cache either way.
+     * Call from IO — this stats the file.
+     */
+    private fun localArchiveCoverDest(archivePath: String): Path? {
+        if (archivePath.isEmpty()) return null
+        val file = File(archivePath)
+        val real = file.isFile
+        return ArchiveCoverCache.resolveCoverDest(
+            archivePath,
+            if (real) file.lastModified() else 0L,
+            if (real) file.length() else 0L,
+        )
     }
 
     private fun parseZipMemberKey(key: String, prefix: String): Triple<Long, String, String>? {
