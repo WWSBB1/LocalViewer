@@ -327,6 +327,16 @@ sealed interface BrowseEntryRemote {
          * stay until the user enters; enter then re-reads EOCD and clears the mark.
          */
         val zipStale: Boolean = false,
+        /**
+         * True when this row came from a full classify, i.e. its cover was actually
+         * resolved (image, else video, else archive, else genuinely none).
+         *
+         * Rows persisted before the video/archive cover fallback existed lack the key and
+         * decode as false; [NetworkFolderIndexCache.load] reports those folders as a cache
+         * miss so they are listed once more. Defaults to false so an absent marker is
+         * always read as "needs one more pass" rather than silently keeping a stale cover.
+         */
+        val coverScanned: Boolean = false,
     ) : BrowseEntryRemote
 
     data class FolderGallery(
@@ -1514,6 +1524,13 @@ fun classifyRemoteListingWithPeeks(
         for (i in dirs.indices) {
             val sz = childSizeByName[dirs[i].name] ?: continue
             if (dirs[i].size != sz) dirs[i] = dirs[i].copy(size = sz)
+        }
+    }
+    // Every row from a real classify had its cover resolved (image → video → archive →
+    // none). Rows left Pending were never peeked (shallow paint) and must stay unscanned.
+    for (i in dirs.indices) {
+        if (dirs[i].presence != DirPresence.Pending && !dirs[i].coverScanned) {
+            dirs[i] = dirs[i].copy(coverScanned = true)
         }
     }
     dirs.sortWith { a, b -> naturalCompare(a.name, b.name) }

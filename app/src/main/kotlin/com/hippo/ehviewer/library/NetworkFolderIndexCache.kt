@@ -39,8 +39,19 @@ import splitties.init.appCtx
  * cannot delete it. Legacy files under [appCtx.cacheDir] are copied on first load/save.
  */
 object NetworkFolderIndexCache {
-    /** Bump when on-disk entry shape changes — old JSON is ignored (no migration). */
+    /**
+     * Shape this build writes. Bump only for a **breaking** shape change: adding an
+     * optional key does not need one, because [decodeEntries] reads every optional field
+     * with `opt*`, so an absent key just decodes to its default.
+     */
     private const val VERSION = 6
+
+    /**
+     * Oldest on-disk shape still readable here. 5 differs from 6 only by the optional
+     * video/archive cover keys, which decode to null/false; those folders are then
+     * re-listed once ([needsCoverScan]) instead of discarding the whole index.
+     */
+    private const val MIN_READABLE_VERSION = 5
     private const val KIND_DIRECTORY = "directory"
     private const val KIND_FOLDER_GALLERY = "folder_gallery"
     private const val KIND_ARCHIVE = "archive"
@@ -183,6 +194,13 @@ object NetworkFolderIndexCache {
                 .onFailure { logcat("FolderIndex", it) }
                 .getOrNull()
                 ?: return@withLock null
+            // Rows written before the video/archive cover fallback carry no cover info for
+            // a folder without images. Report a miss so this one folder is listed again and
+            // its covers resolve — unlike a VERSION bump, which would also discard every
+            // sibling folder's index.
+            if (decoded.any { it is BrowseEntryRemote.Directory && it.needsCoverScan() }) {
+                return@withLock null
+            }
             file.setLastModified(System.currentTimeMillis())
             decoded
         }
@@ -451,7 +469,10 @@ object NetworkFolderIndexCache {
             .getOrNull()
     }
 
-    private fun matchesVersion(root: JSONObject): Boolean = root.optInt("version", -1) == VERSION
+    private fun matchesVersion(root: JSONObject): Boolean {
+        val version = root.optInt("version", -1)
+        return version in MIN_READABLE_VERSION..VERSION
+    }
 
     private fun encodeEntries(entries: List<BrowseEntryRemote>) = JSONArray().apply {
         entries.forEach { entry ->
@@ -470,6 +491,7 @@ object NetworkFolderIndexCache {
                             entry.coverFileName?.let { put("coverFileName", it) }
                             entry.coverVideoFileName?.let { put("coverVideoFileName", it) }
                             entry.coverArchiveFileName?.let { put("coverArchiveFileName", it) }
+                            if (entry.coverScanned) put("coverScanned", true)
                             if (entry.lastModifiedMs > 0L) put("lastModifiedMs", entry.lastModifiedMs)
                             if (entry.size > 0L) put("size", entry.size)
                             if (entry.unreachable) put("unreachable", true)
@@ -526,6 +548,7 @@ object NetworkFolderIndexCache {
                         coverFileName = item.optNullableString("coverFileName"),
                         coverVideoFileName = item.optNullableString("coverVideoFileName"),
                         coverArchiveFileName = item.optNullableString("coverArchiveFileName"),
+                        coverScanned = item.optBoolean("coverScanned"),
                         lastModifiedMs = item.optLong("lastModifiedMs"),
                         size = item.optLong("size"),
                         hidden = hidden,
@@ -574,6 +597,14 @@ object NetworkFolderIndexCache {
             )
         }
     }
+
+    /**
+     * Folder row written before the video/archive cover fallback existed, with no image
+     * cover either — one more listing of its parent is needed to resolve its cover.
+     * Folders that already have an image cover are unaffected, so this stays narrow.
+     */
+    private fun BrowseEntryRemote.Directory.needsCoverScan(): Boolean =
+        !coverScanned && coverFileName == null
 
     private fun JSONObject.optNullableString(name: String): String? = if (has(name) && !isNull(name)) getString(name) else null
 

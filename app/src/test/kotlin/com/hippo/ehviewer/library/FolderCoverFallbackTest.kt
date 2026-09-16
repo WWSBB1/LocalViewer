@@ -1,7 +1,9 @@
 package com.hippo.ehviewer.library
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -176,5 +178,41 @@ class FolderCoverFallbackTest {
         )
         val packs = entries.filterIsInstance<BrowseEntryRemote.Directory>().single { it.name == "Packs" }
         assertEquals("vol.rar", packs.coverArchiveFileName)
+    }
+
+    // --- persisted-index marker ---------------------------------------------
+
+    /**
+     * A row from a real classify has its cover resolved, so it is marked and an index
+     * written from it is trusted as-is. This is what keeps [NetworkFolderIndexCache] from
+     * having to re-list folders on every upgrade.
+     */
+    @Test
+    fun classifiedRows_areMarkedCoverScanned() {
+        val entries = classifyRemoteListingWithPeeks(
+            currentDirName = "Library",
+            entries = listOf(RemoteChild(name = "Volumes", isDirectory = true)),
+            childPeeks = mapOf(
+                "Volumes" to listOf(RemoteChild(name = "v01.cbz", isDirectory = false)),
+            ),
+        )
+        val volumes = entries.filterIsInstance<BrowseEntryRemote.Directory>().single()
+        assertTrue(volumes.coverScanned)
+    }
+
+    /**
+     * Cold shallow paint never peeked these dirs, so their cover is unknown — they must
+     * stay unmarked so a later real listing still resolves it.
+     */
+    @Test
+    fun unpeekedPendingRows_stayUnscanned() {
+        val entries = classifyRemoteListingWithPeeks(
+            currentDirName = "Library",
+            entries = listOf(RemoteChild(name = "Shows", isDirectory = true)),
+            childPeeks = emptyMap(),
+        )
+        val shows = entries.filterIsInstance<BrowseEntryRemote.Directory>().single()
+        assertEquals(DirPresence.Pending, shows.presence)
+        assertFalse(shows.coverScanned)
     }
 }
