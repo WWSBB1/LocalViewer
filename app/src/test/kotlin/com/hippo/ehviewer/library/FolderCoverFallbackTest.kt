@@ -1,9 +1,7 @@
 package com.hippo.ehviewer.library
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -180,39 +178,28 @@ class FolderCoverFallbackTest {
         assertEquals("vol.rar", packs.coverArchiveFileName)
     }
 
-    // --- persisted-index marker ---------------------------------------------
+    // --- leaf-peek cover resolution -----------------------------------------
 
     /**
-     * A row from a real classify has its cover resolved, so it is marked and an index
-     * written from it is trusted as-is. This is what keeps [NetworkFolderIndexCache] from
-     * having to re-list folders on every upgrade.
+     * The video lives one level down: S itself is only a promoted shell, and its cover
+     * still has to come from the same grand peek the promotion used.
      */
     @Test
-    fun classifiedRows_areMarkedCoverScanned() {
+    fun promotedLeafVideoShell_takesItsCoverFromTheGrandPeek() {
         val entries = classifyRemoteListingWithPeeks(
             currentDirName = "Library",
-            entries = listOf(RemoteChild(name = "Volumes", isDirectory = true)),
+            entries = listOf(RemoteChild(name = "Series", isDirectory = true)),
             childPeeks = mapOf(
-                "Volumes" to listOf(RemoteChild(name = "v01.cbz", isDirectory = false)),
+                "Series" to listOf(RemoteChild(name = "cd1", isDirectory = true)),
+            ),
+            grandPeeks = mapOf(
+                "Series/cd1" to listOf(RemoteChild(name = "ep1.mkv", isDirectory = false)),
             ),
         )
-        val volumes = entries.filterIsInstance<BrowseEntryRemote.Directory>().single()
-        assertTrue(volumes.coverScanned)
-    }
-
-    /**
-     * Cold shallow paint never peeked these dirs, so their cover is unknown — they must
-     * stay unmarked so a later real listing still resolves it.
-     */
-    @Test
-    fun unpeekedPendingRows_stayUnscanned() {
-        val entries = classifyRemoteListingWithPeeks(
-            currentDirName = "Library",
-            entries = listOf(RemoteChild(name = "Shows", isDirectory = true)),
-            childPeeks = emptyMap(),
-        )
-        val shows = entries.filterIsInstance<BrowseEntryRemote.Directory>().single()
-        assertEquals(DirPresence.Pending, shows.presence)
-        assertFalse(shows.coverScanned)
+        val series = entries.filterIsInstance<BrowseEntryRemote.Directory>()
+            .single { it.name == "Series" }
+        assertEquals(DirPresence.PromotedShell, series.presence)
+        assertNull(series.coverFileName)
+        assertEquals("cd1/ep1.mkv", series.coverVideoFileName)
     }
 }
