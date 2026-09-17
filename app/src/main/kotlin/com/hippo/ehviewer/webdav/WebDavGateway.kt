@@ -4,6 +4,7 @@ import com.ehviewer.core.database.model.WebDavSourceEntity
 import com.ehviewer.core.util.logcat
 import com.ehviewer.core.util.withIOContext
 import com.hippo.ehviewer.Settings
+import com.hippo.ehviewer.library.BROWSE_PROGRESS_PUBLISH_INTERVAL_NS
 import com.hippo.ehviewer.library.BrowseEntryRemote
 import com.hippo.ehviewer.library.BrowseSession
 import com.hippo.ehviewer.library.FolderGalleryIndex
@@ -32,6 +33,7 @@ import com.hippo.ehviewer.library.replaceSlimDirectFilesFromLive
 import com.hippo.ehviewer.library.selectCachedFolderListing
 import com.hippo.ehviewer.library.withHiddenFlags
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -430,68 +432,78 @@ object WebDavGateway {
                 (deepScanHidden || !c.hidden)
         }
         val peeks = ConcurrentHashMap<String, List<RemoteChild>>()
+        val grandPeeks = ConcurrentHashMap<String, List<RemoteChild>>()
+        val dirName = relativeDir.substringAfterLast('/').ifEmpty { source.displayName }
+        val zipAsDir = Settings.browseZipAsDir.value
         val gate = Semaphore(peekConcurrency())
+
+        // Progressive paint while the layer is being classified. Throttled so a folder with
+        // hundreds of children repaints in steps rather than once per child; CAS keeps the
+        // stamp unique across the parallel peek chains.
+        val lastPublishNs = AtomicLong(0L)
+        suspend fun publishPartial() {
+            val callback = onPartial ?: return
+            val now = System.nanoTime()
+            val last = lastPublishNs.get()
+            if (now - last < BROWSE_PROGRESS_PUBLISH_INTERVAL_NS) return
+            if (!lastPublishNs.compareAndSet(last, now)) return
+            callback(
+                if (zipAsDir) {
+                    val nonZip = children.filter { it.isDirectory || !isZipArchiveFileName(it.name) }
+                    classifyRemoteListingWithPeeks(dirName, nonZip, peeks, grandPeeks) +
+                        ZipAsDirListing.pendingZipDirectoryRows(children)
+                } else {
+                    classifyRemoteListingWithPeeks(dirName, children, peeks, grandPeeks)
+                },
+            )
+        }
+
         if (dirsToPeek.isNotEmpty()) {
             coroutineScope {
                 dirsToPeek.map { c ->
                     async {
                         gate.withPermit {
                             val childRel = joinRelative(relativeDir, c.name)
-                            peeks[c.name] = runCatching {
+                            val peek = runCatching {
                                 listChildrenForRelativeDir(source, password, childRel)
                             }.getOrDefault(emptyList())
+                            // One child's whole chain: a folder of folders takes its cover
+                            // from one level below, so its leaves are walked here rather than
+                            // in a second wave after every sibling. That is what lets this
+                            // folder show its cover without waiting for the rest of the layer.
+                            //
+                            // First peek already ran (needed for `.nomedia` detection); hidden
+                            // dirs are not scanned into when Hidden files is off.
+                            val leaves = if (!deepScanHidden && peekIndicatesHiddenDir(c.name, peek)) {
+                                emptyList()
+                            } else {
+                                peek.filter { it.isDirectory && isPromotableLeafDirName(it.name) }
+                            }
+                            val leavesToPeek = if (leaves.size in 1..SMB_PROMOTE_MAX_LEAVES) {
+                                leaves
+                            } else {
+                                // Cover-only: first leaf when promote budget exceeded.
+                                leaves.take(1)
+                            }
+                            for (leaf in leavesToPeek) {
+                                val leafRel = joinRelative(childRel, leaf.name)
+                                grandPeeks["${c.name}/${leaf.name}"] = runCatching {
+                                    listChildrenForRelativeDir(source, password, leafRel)
+                                }.getOrDefault(emptyList())
+                            }
+                            // Publish the child only once its whole chain is in, so the row it
+                            // paints is already its final shape.
+                            peeks[c.name] = peek
+                            publishPartial()
                         }
                     }
                 }.awaitAll()
             }
         }
 
-        val grandPeeks = ConcurrentHashMap<String, List<RemoteChild>>()
-        val leavesToPeek = ArrayList<Pair<String, String>>()
-        for ((subName, peek) in peeks) {
-            // First peek already ran (needed for `.nomedia` detection). Skip grandchild
-            // scans into hidden dirs when Hidden files is off.
-            if (!deepScanHidden && peekIndicatesHiddenDir(subName, peek)) continue
-            // sample/ does not count toward the 1..3 leaf budget or grand-peek work.
-            val leaves = peek.filter { it.isDirectory && isPromotableLeafDirName(it.name) }
-            if (leaves.size in 1..SMB_PROMOTE_MAX_LEAVES) {
-                for (leaf in leaves) {
-                    leavesToPeek += subName to leaf.name
-                }
-            } else if (leaves.isNotEmpty()) {
-                // Cover-only: first leaf when promote budget exceeded.
-                leavesToPeek += subName to leaves.first().name
-            }
-        }
-        if (leavesToPeek.isNotEmpty()) {
-            coroutineScope {
-                leavesToPeek.map { (subName, leafName) ->
-                    async {
-                        gate.withPermit {
-                            val leafRel = joinRelative(joinRelative(relativeDir, subName), leafName)
-                            grandPeeks["$subName/$leafName"] = runCatching {
-                                listChildrenForRelativeDir(source, password, leafRel)
-                            }.getOrDefault(emptyList())
-                        }
-                    }
-                }.awaitAll()
-            }
-        }
-
-        val dirName = relativeDir.substringAfterLast('/').ifEmpty { source.displayName }
-        val zipListings = if (Settings.browseZipAsDir.value &&
+        val zipListings = if (zipAsDir &&
             children.any { !it.isDirectory && isZipArchiveFileName(it.name) }
         ) {
-            if (onPartial != null) {
-                val nonZip = children.filter { it.isDirectory || !isZipArchiveFileName(it.name) }
-                val partial = classifyRemoteListingWithPeeks(
-                    dirName,
-                    nonZip,
-                    peeks,
-                    grandPeeks,
-                ) + ZipAsDirListing.pendingZipDirectoryRows(children)
-                onPartial(partial)
-            }
             zipRootListings(source, password, relativeDir, children)
         } else {
             emptyMap()

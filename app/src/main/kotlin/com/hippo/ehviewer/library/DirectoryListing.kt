@@ -932,6 +932,14 @@ fun replaceSlimDirectFilesFromLive(
  */
 const val SMB_PROMOTE_MAX_LEAVES = 3
 
+/**
+ * Minimum gap between progressive repaints while a lazy-scan layer is being classified.
+ *
+ * Small enough that a folder shows its cover right after its own chain finishes, large
+ * enough that a layer with hundreds of children does not recompose once per child.
+ */
+const val BROWSE_PROGRESS_PUBLISH_INTERVAL_NS = 250_000_000L
+
 /** Display name for gallery S after leaf promotion (`@S` sorts first). */
 fun promotedSubGalleryName(subName: String) = "@$subName"
 
