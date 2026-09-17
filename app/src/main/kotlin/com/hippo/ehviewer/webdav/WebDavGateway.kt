@@ -50,19 +50,19 @@ import kotlinx.coroutines.withTimeout
 
 /**
  * Browse listing for WebDAV: PROPFIND + parallel peeks + same remote classify as SMB.
- * No TCP session pool — HTTP multiplexes; peek fan-out follows Advanced →
- * WebDAV concurrent listing ([Settings.webDavConcurrentListing]).
+ * No TCP session pool — HTTP multiplexes; peek fan-out follows the browse budget
+ * ([Settings.thumbConcurrency], Advanced → thumbnail concurrency).
  */
 object WebDavGateway {
     /** Deep peek/classify budget after shallow paint; keep shallow on expiry. */
     private const val DEEP_CLASSIFY_TIMEOUT_MS = 180_000L
 
     /**
-     * Subfolder PROPFIND / zip-root fan-out. Advanced → WebDAV concurrent listing, read
-     * from the settings-fed volatile ([ThumbConcurrency.webDavListing]) — never a blocking
-     * preference read, and no clamp below what the user configured.
+     * Subfolder PROPFIND / zip-root fan-out. Browse-owned, so it follows the browse budget
+     * ([ThumbConcurrency.thumbBudget], Advanced → thumbnail concurrency) rather than a
+     * separate network setting — one knob covers scanning and covers alike.
      */
-    private fun peekConcurrency(): Int = ThumbConcurrency.webDavListing()
+    private fun peekConcurrency(): Int = ThumbConcurrency.thumbBudget()
 
     fun sourceConfigKey(source: WebDavSourceEntity): String = "${source.id}|${source.baseUrl}|${source.pathPrefix}|${source.username}"
 

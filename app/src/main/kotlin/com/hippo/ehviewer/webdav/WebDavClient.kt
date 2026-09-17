@@ -122,7 +122,12 @@ object WebDavClient {
      * Parallel list/peek concurrency (HTTP/2 multiplex + HTTP/1.1 multi-connection).
      * Advanced → WebDAV concurrent listing; used to be fixed at 6 and ignored the setting.
      */
-    private val listSlots = SettingSlots { ThumbConcurrency.webDavListing() }
+    /**
+     * PROPFIND budget. Browse-owned: [listChildren] is only reached from the WebDAV browse
+     * gateway, never from the reader, so it follows the browse/thumbnail budget rather than
+     * a separate network setting.
+     */
+    private val listSlots = SettingSlots { ThumbConcurrency.thumbBudget() }
 
     /** Must cover the largest `webdav_download_slots` value in `arrays.xml`. */
     private const val DOWNLOAD_SLOTS_MAX = 10
@@ -133,6 +138,18 @@ object WebDavClient {
     private fun downloadGate(): Semaphore = downloadSlots.gate()
 
     /**
+     * Run a transfer under the reader's download gate, or straight through when the caller
+     * already holds its own budget.
+     *
+     * Browse covers take [com.hippo.ehviewer.library.ThumbConcurrency.thumbBudget] via
+     * [WebDavCache.ensureBrowseThumb]; queueing them behind the reader gate as well would
+     * cap them at the *smaller* of the two settings, which is not what the thumbnail
+     * concurrency setting promises.
+     */
+    private suspend fun <T> withDownloadSlot(gated: Boolean, block: suspend () -> T): T =
+        if (gated) downloadGate().withPermit { block() } else block()
+
+    /**
      * Dedicated CIO workers with [TrafficStats] tag set for the whole thread lifetime
      * so [SocketChannel] opens are not UntaggedSocketViolation in debug StrictMode.
      */
@@ -141,10 +158,11 @@ object WebDavClient {
     /**
      * CIO reads block their worker thread, so the pool must cover the largest permitted
      * fan-out or the Advanced concurrency settings silently cap out: WebDAV concurrent
-     * downloads (≤[DOWNLOAD_SLOTS_MAX]) + concurrent listing (≤[ThumbConcurrency.WEBDAV_LISTING_MAX]).
+     * downloads (≤[DOWNLOAD_SLOTS_MAX]) + browse listing/PROPFIND (now the thumbnail
+     * concurrency budget, ≤[ThumbConcurrency.THUMB_CONCURRENCY_MAX]).
      */
     private val cioExecutor = Executors.newFixedThreadPool(
-        DOWNLOAD_SLOTS_MAX + ThumbConcurrency.WEBDAV_LISTING_MAX,
+        DOWNLOAD_SLOTS_MAX + ThumbConcurrency.THUMB_CONCURRENCY_MAX,
         ThreadFactory { runnable ->
             Thread(
                 {
@@ -522,6 +540,8 @@ object WebDavClient {
         password: String,
         relativeFilePath: String,
         out: OutputStream,
+        /** false: caller already holds its own budget — see [withDownloadSlot]. */
+        gated: Boolean = true,
     ) = withIOContext {
         ZipAsDirListing.zipMemberPath(relativeFilePath)?.let { (zipRel, member) ->
             val bytes = ZipMemberCover.extractBytes("webdav:${source.id}:$zipRel", member) {
@@ -531,7 +551,7 @@ object WebDavClient {
             return@withIOContext
         }
         val downloadContext = coroutineContext
-        downloadGate().withPermit {
+        withDownloadSlot(gated) {
             withTransportRetry {
                 val url = absoluteUrl(source, relativeFilePath)
                 val auth = basicAuthHeader(source.username, password)

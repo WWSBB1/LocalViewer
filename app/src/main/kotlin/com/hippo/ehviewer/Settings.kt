@@ -472,12 +472,10 @@ object Settings : DataStorePreferences(null) {
     }
 
     /**
-     * WebDAV subfolder PROPFIND / zip-root fan-out (Advanced). Default: 5.
-     */
-    val webDavConcurrentListing = intPref("webdav_concurrent_listing", 5)
-
-    /**
      * WebDAV parallel page / Range GET fan-out (Advanced). Default: 4.
+     *
+     * Reader-side transfers only. Browse listing / peeks / cover fetches follow
+     * [thumbConcurrency] instead.
      */
     val webDavDownloadSlots = intPref("webdav_download_slots", 4)
 

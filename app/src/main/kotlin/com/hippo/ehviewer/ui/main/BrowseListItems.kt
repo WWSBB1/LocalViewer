@@ -1445,7 +1445,16 @@ fun BrowseCoverThumb(
                             cover.remoteRelativeFile,
                             cacheOriginal = cacheThumbOriginal,
                         ) { out ->
-                            WebDavClient.downloadFile(source, password, cover.remoteRelativeFile, out)
+                            // gated = false: this call already sits inside
+                            // WebDavCache.ensureBrowseThumb's thumb slot, so the browse
+                            // budget alone decides how many covers fetch at once.
+                            WebDavClient.downloadFile(
+                                source,
+                                password,
+                                cover.remoteRelativeFile,
+                                out,
+                                gated = false,
+                            )
                         }
                         fetchFailed = false
                         return@LaunchedEffect

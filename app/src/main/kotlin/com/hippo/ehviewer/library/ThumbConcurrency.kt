@@ -24,9 +24,6 @@ import kotlinx.coroutines.sync.Semaphore
  * plain field read.
  */
 object ThumbConcurrency {
-    /** Keep in sync with arrays.xml. */
-    const val WEBDAV_LISTING_MAX = 10
-
     /** [Settings.thumbConcurrency] slider range (Advanced → thumbnail concurrency). */
     const val THUMB_CONCURRENCY_MAX = 20
 
@@ -39,9 +36,6 @@ object ThumbConcurrency {
 
     @Volatile
     private var smbConnections = 3
-
-    @Volatile
-    private var webDavListingSlots = 5
 
     /** [Settings.thumbConcurrency] — the one knob behind [thumbBudget]. */
     @Volatile
@@ -61,11 +55,6 @@ object ThumbConcurrency {
             }
         }
         scope.launch {
-            Settings.webDavConcurrentListing.valueFlow().collectLatest { value ->
-                webDavListingSlots = value.coerceAtLeast(1)
-            }
-        }
-        scope.launch {
             Settings.thumbConcurrency.valueFlow().collectLatest { value ->
                 thumbSlots = value.coerceIn(1, THUMB_CONCURRENCY_MAX)
             }
@@ -74,9 +63,6 @@ object ThumbConcurrency {
 
     /** WebDAV browse/video transfer slots. */
     fun webDav(): Int = webDavSlots
-
-    /** WebDAV list/PROPFIND slots (Advanced → WebDAV concurrent listing). */
-    fun webDavListing(): Int = webDavListingSlots
 
     /** SMB browse/video transfer slots: follows the SMB concurrent-connection setting. */
     fun smb(): Int = smbConnections
