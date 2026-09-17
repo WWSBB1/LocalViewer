@@ -1807,3 +1807,19 @@ fun isShallowIncompleteListing(entries: List<BrowseEntryRemote>): Boolean {
         it.presence == DirPresence.Pending || it.presence == DirPresence.Empty
     }
 }
+
+/**
+ * True when a listing still holds a direct directory that was never peeked, i.e. the deep
+ * classify did not finish.
+ *
+ * [DirPresence.Pending] is emitted for exactly those rows — a dir that is skipped on
+ * purpose (dot name / hidden with hidden files off) comes out as [DirPresence.Empty]
+ * instead — so this is the precise "scan unfinished" test. [isShallowIncompleteListing]
+ * cannot be used for it: that one requires *every* row to be an empty shell, so a
+ * half-finished listing (partly classified, partly still Pending) reads as complete.
+ *
+ * Needed because an interrupted deep pass is now persisted so progress survives leaving
+ * the folder; such a listing must be resumed, never adopted as the finished one.
+ */
+fun hasUnpeekedDirectories(entries: List<BrowseEntryRemote>): Boolean =
+    entries.any { it is BrowseEntryRemote.Directory && it.presence == DirPresence.Pending }

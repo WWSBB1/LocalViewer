@@ -7,6 +7,7 @@ import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.library.BROWSE_PROGRESS_PUBLISH_INTERVAL_NS
 import com.hippo.ehviewer.library.BrowseEntryRemote
 import com.hippo.ehviewer.library.BrowseSession
+import com.hippo.ehviewer.library.DirPresence
 import com.hippo.ehviewer.library.FolderGalleryIndex
 import com.hippo.ehviewer.library.NetworkFolderIndexCache
 import com.hippo.ehviewer.library.RemoteChild
@@ -19,6 +20,7 @@ import com.hippo.ehviewer.library.ZipCdParse
 import com.hippo.ehviewer.library.ZipCentralDirectory
 import com.hippo.ehviewer.library.classifyRemoteListing
 import com.hippo.ehviewer.library.classifyRemoteListingWithPeeks
+import com.hippo.ehviewer.library.hasUnpeekedDirectories
 import com.hippo.ehviewer.library.hiddenDirectoriesNeedingDeepScan
 import com.hippo.ehviewer.library.isDotHiddenName
 import com.hippo.ehviewer.library.isPromotableLeafDirName
@@ -56,6 +58,42 @@ import kotlinx.coroutines.withTimeout
 object WebDavGateway {
     /** Deep peek/classify budget after shallow paint; keep shallow on expiry. */
     private const val DEEP_CLASSIFY_TIMEOUT_MS = 180_000L
+
+    /**
+     * How often an unfinished deep pass writes what it has so far.
+     *
+     * A big layer can need minutes of PROPFINDs; before this, nothing was stored until it
+     * finished, so leaving the folder threw all of it away and the next visit started from
+     * zero — it never converged. Coarser than the paint throttle because each write
+     * re-encodes the source's whole index file.
+     */
+    private const val PROGRESS_SAVE_INTERVAL_NS = 5_000_000_000L
+
+    /**
+     * Rows of direct children an earlier (interrupted) pass already classified, keyed by
+     * child name. Promoted/virtual rows are excluded — they are not direct children.
+     */
+    private fun knownRowsOf(previous: List<BrowseEntryRemote>?): Map<String, BrowseEntryRemote.Directory> =
+        previous.orEmpty().asSequence()
+            .filterIsInstance<BrowseEntryRemote.Directory>()
+            .filter { it.presence != DirPresence.Pending && it.relativeName == it.name && !it.virtual }
+            .associateBy { it.name }
+
+    /** Replace still-[DirPresence.Pending] rows with the ones [previous] already resolved. */
+    private fun applyKnownRows(
+        rows: List<BrowseEntryRemote>,
+        known: Map<String, BrowseEntryRemote.Directory>,
+    ): List<BrowseEntryRemote> = if (known.isEmpty()) {
+        rows
+    } else {
+        rows.map { row ->
+            if (row is BrowseEntryRemote.Directory && row.presence == DirPresence.Pending) {
+                known[row.name] ?: row
+            } else {
+                row
+            }
+        }
+    }
 
     /**
      * Subfolder PROPFIND / zip-root fan-out. Browse-owned, so it follows the browse budget
@@ -139,7 +177,9 @@ object WebDavGateway {
                         "ram=${ram != null} disk=${disk != null}",
                 )
                 if (!shouldQuickScan) return presented
-                if (isShallowIncompleteListing(cached.entries)) {
+                // Shallow stub, or a deep pass that was interrupted and saved its progress:
+                // both need the peek/classify pass, which resumes from the stored rows.
+                if (isShallowIncompleteListing(cached.entries) || hasUnpeekedDirectories(cached.entries)) {
                     return listDirectoryShallowThenDeep(
                         source,
                         password,
@@ -224,7 +264,13 @@ object WebDavGateway {
         } else {
             children
         }
-        val shallow = classifyRemoteListing(dirName, shallowChildren.withHiddenFlags())
+        // Keep rows an interrupted earlier pass already resolved: the shallow classify has
+        // every directory as Pending, and without this the covers already cached would be
+        // dropped for however long the fresh PROPFINDs take.
+        val shallow = applyKnownRows(
+            classifyRemoteListing(dirName, shallowChildren.withHiddenFlags()),
+            knownRowsOf(previous),
+        )
         val shallowMerged = if (previous != null) {
             preferCompleteFolderGalleries(previous, shallow)
         } else {
@@ -255,6 +301,9 @@ object WebDavGateway {
             if (cached.sessionCurrent) return cached.entries
         }
 
+        // Clock for the incremental save inside the deep pass (coarser than the paint).
+        val lastProgressSaveNs = AtomicLong(0L)
+
         return try {
             withTimeout(DEEP_CLASSIFY_TIMEOUT_MS) {
                 coroutineContext.ensureActive()
@@ -265,6 +314,7 @@ object WebDavGateway {
                         password,
                         relativeDir,
                         children,
+                        previous = previous,
                         onPartial = { partial ->
                             val merged = preferCompleteFolderGalleries(shallowMerged, partial)
                             BrowseSession.putWebDavListing(
@@ -275,6 +325,22 @@ object WebDavGateway {
                                 childrenFresh = true,
                             )
                             onCached?.invoke(merged)
+                            // Persist progress: leaving the folder must not throw away the
+                            // peeks already done. The saved listing still holds Pending rows,
+                            // which [hasUnpeekedDirectories] reads back as "resume me", so it
+                            // is never adopted as the finished listing.
+                            val saveNow = System.nanoTime()
+                            val lastSave = lastProgressSaveNs.get()
+                            if (saveNow - lastSave >= PROGRESS_SAVE_INTERVAL_NS &&
+                                lastProgressSaveNs.compareAndSet(lastSave, saveNow)
+                            ) {
+                                NetworkFolderIndexCache.saveWebDav(
+                                    source.id,
+                                    configKey,
+                                    relativeDir,
+                                    merged,
+                                )
+                            }
                         },
                     )
                 }
@@ -449,21 +515,30 @@ object WebDavGateway {
         password: String,
         relativeDir: String,
         children: List<RemoteChild>,
+        previous: List<BrowseEntryRemote>? = null,
         onPartial: (suspend (List<BrowseEntryRemote>) -> Unit)? = null,
     ): List<BrowseEntryRemote> {
         val deepScanHidden = com.hippo.ehviewer.Settings.browseShowHiddenFiles.value
+        // Resume: a child an interrupted earlier pass already classified is carried over and
+        // not peeked again. Without this a layer with hundreds of children restarts from
+        // zero on every visit and never converges.
+        val known = knownRowsOf(previous)
         // Dot folders: always tag-only (never peek). `.nomedia` dirs peek only when Hidden on.
         val dirsToPeek = children.filter { c ->
             c.isDirectory &&
                 !isProtectedSystemName(c.name) &&
                 !isDotHiddenName(c.name) &&
-                (deepScanHidden || !c.hidden)
+                (deepScanHidden || !c.hidden) &&
+                c.name !in known
         }
         val peeks = ConcurrentHashMap<String, List<RemoteChild>>()
         val grandPeeks = ConcurrentHashMap<String, List<RemoteChild>>()
         val dirName = relativeDir.substringAfterLast('/').ifEmpty { source.displayName }
         val zipAsDir = Settings.browseZipAsDir.value
         val gate = Semaphore(peekConcurrency())
+
+        /** Carry forward rows of children this pass did not re-peek (they stay Pending). */
+        fun withKnown(rows: List<BrowseEntryRemote>): List<BrowseEntryRemote> = applyKnownRows(rows, known)
 
         // Progressive paint while the layer is being classified. Throttled so a folder with
         // hundreds of children repaints in steps rather than once per child; CAS keeps the
@@ -476,13 +551,15 @@ object WebDavGateway {
             if (now - last < BROWSE_PROGRESS_PUBLISH_INTERVAL_NS) return
             if (!lastPublishNs.compareAndSet(last, now)) return
             callback(
-                if (zipAsDir) {
-                    val nonZip = children.filter { it.isDirectory || !isZipArchiveFileName(it.name) }
-                    classifyRemoteListingWithPeeks(dirName, nonZip, peeks, grandPeeks) +
-                        ZipAsDirListing.pendingZipDirectoryRows(children)
-                } else {
-                    classifyRemoteListingWithPeeks(dirName, children, peeks, grandPeeks)
-                },
+                withKnown(
+                    if (zipAsDir) {
+                        val nonZip = children.filter { it.isDirectory || !isZipArchiveFileName(it.name) }
+                        classifyRemoteListingWithPeeks(dirName, nonZip, peeks, grandPeeks) +
+                            ZipAsDirListing.pendingZipDirectoryRows(children)
+                    } else {
+                        classifyRemoteListingWithPeeks(dirName, children, peeks, grandPeeks)
+                    },
+                ),
             )
         }
 
@@ -554,12 +631,14 @@ object WebDavGateway {
         } else {
             emptyMap()
         }
-        return ZipAsDirListing.classifyListingWithZipAsDirs(
-            currentDirName = dirName,
-            children = children,
-            childPeeks = peeks,
-            grandPeeks = grandPeeks,
-        ) { zipListings[it] }
+        return withKnown(
+            ZipAsDirListing.classifyListingWithZipAsDirs(
+                currentDirName = dirName,
+                children = children,
+                childPeeks = peeks,
+                grandPeeks = grandPeeks,
+            ) { zipListings[it] },
+        )
     }
 
     private suspend fun listZipVirtualDirectory(
