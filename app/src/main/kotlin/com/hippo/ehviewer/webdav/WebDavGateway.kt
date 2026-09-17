@@ -44,6 +44,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -101,6 +102,51 @@ object WebDavGateway {
      * separate network setting — one knob covers scanning and covers alike.
      */
     private fun peekConcurrency(): Int = ThumbConcurrency.thumbBudget()
+
+    /** PROPFIND attempts per directory before the row is left unresolved. */
+    private const val PEEK_ATTEMPTS = 3
+
+    /** Backoff between attempts (× attempt number). */
+    private const val PEEK_RETRY_DELAY_MS = 400L
+
+    /**
+     * List one directory, retrying transient failures.
+     *
+     * Returns null only after every attempt failed, and **never** swallows
+     * [CancellationException] — that is what turned a cancelled pass into thousands of
+     * "this folder is empty" rows, which were then persisted: folders in the middle of a
+     * large layer kept showing with no cover and no gallery.
+     *
+     * A null result means "unknown", not "empty". Callers must leave the child unresolved
+     * ([DirPresence.Pending]) so [hasUnpeekedDirectories] brings it back on the resume pass,
+     * instead of recording an empty listing that looks final.
+     */
+    private suspend fun peekWithRetry(
+        source: WebDavSourceEntity,
+        password: String,
+        relativeDir: String,
+    ): List<RemoteChild>? {
+        var last: Throwable? = null
+        repeat(PEEK_ATTEMPTS) { attempt ->
+            try {
+                return listChildrenForRelativeDir(source, password, relativeDir)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                last = e
+                ScanDiag.log(
+                    "propfind FAIL ${e::class.simpleName} dir=$relativeDir " +
+                        "attempt=${attempt + 1}/$PEEK_ATTEMPTS msg=${e.message}",
+                )
+                if (attempt < PEEK_ATTEMPTS - 1) delay(PEEK_RETRY_DELAY_MS * (attempt + 1))
+            }
+        }
+        ScanDiag.log(
+            "propfind GIVEUP dir=$relativeDir after $PEEK_ATTEMPTS attempts " +
+                "(${last?.let { it::class.simpleName }}: ${last?.message})",
+        )
+        return null
+    }
 
     fun sourceConfigKey(source: WebDavSourceEntity): String = "${source.id}|${source.baseUrl}|${source.pathPrefix}|${source.username}"
 
@@ -571,10 +617,18 @@ object WebDavGateway {
                         gate.withPermit {
                             val chainStart = System.nanoTime()
                             val childRel = joinRelative(relativeDir, c.name)
-                            val peek = runCatching {
-                                listChildrenForRelativeDir(source, password, childRel)
-                            }.getOrDefault(emptyList())
+                            val peek = peekWithRetry(source, password, childRel)
                             val peekMs = (System.nanoTime() - chainStart) / 1_000_000
+                            if (peek == null) {
+                                // Unknown, not empty: leaving `peeks` without this child keeps
+                                // its row at DirPresence.Pending, so nothing records a bogus
+                                // "empty folder" and the resume pass re-peeks it.
+                                ScanDiag.log(
+                                    "chain UNRESOLVED dir=$relativeDir sub=${c.name} " +
+                                        "peekMs=$peekMs — left Pending",
+                                )
+                                return@withPermit
+                            }
                             // One child's whole chain: a folder of folders takes its cover
                             // from one level below, so its leaves are walked here rather than
                             // in a second wave after every sibling. That is what lets this
@@ -593,11 +647,25 @@ object WebDavGateway {
                                 // Cover-only: first leaf when promote budget exceeded.
                                 leaves.take(1)
                             }
+                            var leafUnresolved = false
                             for (leaf in leavesToPeek) {
                                 val leafRel = joinRelative(childRel, leaf.name)
-                                grandPeeks["${c.name}/${leaf.name}"] = runCatching {
-                                    listChildrenForRelativeDir(source, password, leafRel)
-                                }.getOrDefault(emptyList())
+                                val leafPeek = peekWithRetry(source, password, leafRel)
+                                if (leafPeek == null) {
+                                    leafUnresolved = true
+                                    break
+                                }
+                                grandPeeks["${c.name}/${leaf.name}"] = leafPeek
+                            }
+                            if (leafUnresolved) {
+                                // A missing grand peek would mis-classify the child (no leaf
+                                // promote → no gallery row), so treat the whole chain as
+                                // unresolved rather than settle for a wrong row.
+                                ScanDiag.log(
+                                    "chain UNRESOLVED dir=$relativeDir sub=${c.name} " +
+                                        "(leaf) — left Pending",
+                                )
+                                return@withPermit
                             }
                             // Publish the child only once its whole chain is in, so the row it
                             // paints is already its final shape.
