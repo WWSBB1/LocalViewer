@@ -482,6 +482,16 @@ object Settings : DataStorePreferences(null) {
     val webDavDownloadSlots = intPref("webdav_download_slots", 4)
 
     /**
+     * Shared thumbnail / cover budget (Advanced, 1…20). Drives every cover path at once:
+     * image thumbs (SMB/WebDAV caches), archive first-page covers, video frame probe +
+     * decode, and folder-cover child peeks. Default: 4.
+     *
+     * Previously derived as `max(WebDAV downloads, SMB connections)`; this is now the only
+     * knob, so changing either network setting no longer silently retunes thumbnails.
+     */
+    val thumbConcurrency = intPref("thumb_concurrency", 4)
+
+    /**
      * WebDAV: trust any TLS certificate / skip hostname verify (self-signed LAN HTTPS).
      * Default off — normal system trust for https://. Rebuilds [WebDavClient] on change.
      * Cleartext http:// is controlled by network security config (explicit http URLs only).

@@ -48,6 +48,7 @@ import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.asMutableState
 import com.hippo.ehviewer.ktor.isCronetAvailable
 import com.hippo.ehviewer.library.OriginDiskCache
+import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.ui.Screen
 import com.hippo.ehviewer.ui.main.NavigationIcon
 import com.hippo.ehviewer.ui.screen.adaptiveTopAppBarColors
@@ -310,6 +311,17 @@ fun AnimatedVisibilityScope.AdvancedScreen(navigator: DestinationsNavigator) = S
             SwitchPreference(
                 title = stringResource(id = R.string.preload_thumb_aggressively),
                 state = Settings.preloadThumbAggressively.asMutableState(),
+            )
+            val thumbConcurrency = Settings.thumbConcurrency.asMutableState()
+            IntSliderPreference(
+                minValue = 1,
+                maxValue = ThumbConcurrency.THUMB_CONCURRENCY_MAX,
+                title = stringResource(id = R.string.settings_thumb_concurrency),
+                summary = stringResource(
+                    id = R.string.settings_thumb_concurrency_summary,
+                    thumbConcurrency.value,
+                ),
+                state = thumbConcurrency,
             )
             SwitchPreference(
                 title = stringResource(id = R.string.animate_items),

@@ -186,6 +186,8 @@
     <string name="settings_save_photo_grid_original_cache_summary">下载网络画廊封面或照片缩略图时，同时把原图写入页面缓存（与阅读器相同路径）。关闭则只保留小 JPEG 缩略图。</string>
     <string name="settings_smb_concurrency">SMB 并发连接数</string>
     <string name="settings_smb_concurrency_summary">每个主机最多 %s 个会话（该服务器上所有共享共用；用于定位与预取）</string>
+    <string name="settings_thumb_concurrency">缩略图并发数</string>
+    <string name="settings_thumb_concurrency_summary">同时最多加载 %s 个封面（图片缩略图、压缩包首页、视频首帧、文件夹封面扫描）</string>
     <string name="settings_smb3_only">仅 SMB 3</string>
     <string name="settings_smb3_only_summary">禁用 SMB 2 方言（仅协商 3.0 / 3.0.2 / 3.1.1）。会重置活动 SMB 连接。</string>
     <string name="settings_smb_encrypt">允许 SMB 3 加密</string>

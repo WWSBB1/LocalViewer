@@ -10,11 +10,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 
 /**
- * Browse/video thumbnail concurrency, derived from the network settings instead of the
- * fixed 3-slot caps those paths used to carry.
+ * Browse/video thumbnail concurrency, all settings-derived instead of the fixed caps those
+ * paths used to carry.
  *
- * - WebDAV: Advanced → WebDAV concurrent downloads (`arrays.xml` 2…10)
- * - SMB: Advanced → SMB concurrent connections (1…5)
+ * - Thumbnails / covers: Advanced → thumbnail concurrency, 1…20 ([Settings.thumbConcurrency])
+ * - WebDAV transfers: Advanced → WebDAV concurrent downloads (`arrays.xml` 2…10)
+ * - SMB transfers: Advanced → SMB concurrent connections (1…5)
  *
  * **Never read the preferences from the thumbnail path.** [PrefDelegate.value] is a
  * blocking DataStore read (`runBlocking` in `com.ehviewer.core.preferences.PrefDelegate`),
@@ -23,14 +24,11 @@ import kotlinx.coroutines.sync.Semaphore
  * plain field read.
  */
 object ThumbConcurrency {
-    /** Keep in sync with arrays.xml and WebDavClient. */
-    const val WEBDAV_MAX = 10
-
-    /** [com.hippo.ehviewer.SmbGateway] CONNECTIONS range; mirrors `multi_thread_download`. */
-    private const val SMB_CONNECTIONS_MAX = 5
-
     /** Keep in sync with arrays.xml. */
     const val WEBDAV_LISTING_MAX = 10
+
+    /** [Settings.thumbConcurrency] slider range (Advanced → thumbnail concurrency). */
+    const val THUMB_CONCURRENCY_MAX = 20
 
     /**
      * Defaults mirror [Settings] so thumbnails have a sane budget before the first flow
@@ -44,6 +42,10 @@ object ThumbConcurrency {
 
     @Volatile
     private var webDavListingSlots = 5
+
+    /** [Settings.thumbConcurrency] — the one knob behind [thumbBudget]. */
+    @Volatile
+    private var thumbSlots = 4
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -63,6 +65,11 @@ object ThumbConcurrency {
                 webDavListingSlots = value.coerceAtLeast(1)
             }
         }
+        scope.launch {
+            Settings.thumbConcurrency.valueFlow().collectLatest { value ->
+                thumbSlots = value.coerceIn(1, THUMB_CONCURRENCY_MAX)
+            }
+        }
     }
 
     /** WebDAV browse/video transfer slots. */
@@ -75,10 +82,12 @@ object ThumbConcurrency {
     fun smb(): Int = smbConnections
 
     /**
-     * Shared thumbnail/fetch budget: whichever network the user configured highest.
-     * No downward clamp — the settings are the only limit.
+     * Shared thumbnail / cover budget — every cover path reads this one value: image thumbs
+     * (SMB/WebDAV caches), archive first-page covers, video probe + decode, folder-cover
+     * child peeks. Set by Advanced → thumbnail concurrency, independent of the network
+     * connection settings.
      */
-    fun thumbBudget(): Int = maxOf(webDav(), smb())
+    fun thumbBudget(): Int = thumbSlots
 
     /** Video probe budget. */
     fun videoProbe(): Int = thumbBudget()
@@ -91,7 +100,7 @@ object ThumbConcurrency {
      * (threads / executors that must cover [thumbBudget] and are built before or
      * independently of the first flow emission). Not a runtime cap.
      */
-    val THUMB_BUDGET_MAX = WEBDAV_MAX.coerceAtLeast(SMB_CONNECTIONS_MAX)
+    val THUMB_BUDGET_MAX = THUMB_CONCURRENCY_MAX
 }
 
 /**
