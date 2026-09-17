@@ -416,6 +416,16 @@ object WebDavGateway {
         )
     }
 
+    /**
+     * TEMPORARY diagnostic. The app's own [com.ehviewer.core.util.logcat] output does not
+     * reach Logcat in the self-install release build (`slimRelease`), so this writes through
+     * [android.util.Log] directly, the same way [WebDavClient] already does. Remove once the
+     * slow-folder question is settled.
+     */
+    private fun scanDiag(message: String) {
+        android.util.Log.i("LVScan", message)
+    }
+
     private suspend fun classifyDirectoryChildren(
         source: WebDavSourceEntity,
         password: String,
@@ -459,14 +469,17 @@ object WebDavGateway {
         }
 
         if (dirsToPeek.isNotEmpty()) {
+            val chainsStart = System.nanoTime()
             coroutineScope {
                 dirsToPeek.map { c ->
                     async {
                         gate.withPermit {
+                            val chainStart = System.nanoTime()
                             val childRel = joinRelative(relativeDir, c.name)
                             val peek = runCatching {
                                 listChildrenForRelativeDir(source, password, childRel)
                             }.getOrDefault(emptyList())
+                            val peekMs = (System.nanoTime() - chainStart) / 1_000_000
                             // One child's whole chain: a folder of folders takes its cover
                             // from one level below, so its leaves are walked here rather than
                             // in a second wave after every sibling. That is what lets this
@@ -495,16 +508,31 @@ object WebDavGateway {
                             // paints is already its final shape.
                             peeks[c.name] = peek
                             publishPartial()
+                            scanDiag(
+                                "chain dir=$relativeDir sub=${c.name} entries=${peek.size} " +
+                                    "peekMs=$peekMs leaves=${leavesToPeek.size} " +
+                                    "chainMs=${(System.nanoTime() - chainStart) / 1_000_000}",
+                            )
                         }
                     }
                 }.awaitAll()
             }
+            scanDiag(
+                "chains done dir=$relativeDir children=${dirsToPeek.size} " +
+                    "ms=${(System.nanoTime() - chainsStart) / 1_000_000}",
+            )
         }
 
         val zipListings = if (zipAsDir &&
             children.any { !it.isDirectory && isZipArchiveFileName(it.name) }
         ) {
-            zipRootListings(source, password, relativeDir, children)
+            val zipStart = System.nanoTime()
+            val out = zipRootListings(source, password, relativeDir, children)
+            scanDiag(
+                "zip roots dir=$relativeDir zips=${out.size} " +
+                    "ms=${(System.nanoTime() - zipStart) / 1_000_000}",
+            )
+            out
         } else {
             emptyMap()
         }
