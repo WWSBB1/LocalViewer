@@ -4,6 +4,7 @@ import android.os.Looper
 import com.ehviewer.core.files.mkdirs
 import com.hippo.ehviewer.image.hdr.HdrConvertCache
 import com.hippo.ehviewer.library.OriginDiskCache
+import com.hippo.ehviewer.library.ScanDiag
 import com.hippo.ehviewer.library.SettingSlots
 import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.util.FileUtils
@@ -171,7 +172,11 @@ object WebDavCache {
         cacheOriginal: Boolean = false,
         download: suspend (OutputStream) -> Unit,
     ): Path = withContext(Dispatchers.IO) {
-        cachedThumbIfPresent(sourceId, remoteRelativeFile)?.let { return@withContext it }
+        val thumbStart = System.nanoTime()
+        cachedThumbIfPresent(sourceId, remoteRelativeFile)?.let {
+            ScanDiag.log("thumb DISK file=$remoteRelativeFile")
+            return@withContext it
+        }
         val destPath = thumbCachePath(sourceId, remoteRelativeFile)
         val pagePath = cachePathForRemoteFile(sourceId, remoteRelativeFile, Kind.Page)
         val key = destPath.toString()
@@ -218,8 +223,13 @@ object WebDavCache {
                     }
                 }
                 scheduleTrim()
-                cachedThumbIfPresent(sourceId, remoteRelativeFile)
+                val built = cachedThumbIfPresent(sourceId, remoteRelativeFile)
                     ?: error("WebDAV browse thumb missing after write for $remoteRelativeFile")
+                ScanDiag.log(
+                    "thumb FETCH file=$remoteRelativeFile " +
+                        "ms=${(System.nanoTime() - thumbStart) / 1_000_000}",
+                )
+                built
             }
         }
     }

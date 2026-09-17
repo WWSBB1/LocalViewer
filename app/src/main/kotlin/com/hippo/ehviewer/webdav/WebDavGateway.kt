@@ -12,6 +12,7 @@ import com.hippo.ehviewer.library.NetworkFolderIndexCache
 import com.hippo.ehviewer.library.RemoteChild
 import com.hippo.ehviewer.library.RemoteDirectorySlimPlan
 import com.hippo.ehviewer.library.SMB_PROMOTE_MAX_LEAVES
+import com.hippo.ehviewer.library.ScanDiag
 import com.hippo.ehviewer.library.ThumbConcurrency
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipCdParse
@@ -132,6 +133,11 @@ object WebDavGateway {
                 val shouldQuickScan =
                     com.hippo.ehviewer.Settings.networkFolderIndexQuickScan.value &&
                         !cached.sessionCurrent
+                ScanDiag.log(
+                    "cache HIT dir=$relativeDir entries=${presented.size} " +
+                        "sessionCurrent=${cached.sessionCurrent} quickScan=$shouldQuickScan " +
+                        "ram=${ram != null} disk=${disk != null}",
+                )
                 if (!shouldQuickScan) return presented
                 if (isShallowIncompleteListing(cached.entries)) {
                     return listDirectoryShallowThenDeep(
@@ -143,9 +149,15 @@ object WebDavGateway {
                     )
                 }
                 return try {
+                    val slimStart = System.nanoTime()
                     val refresh = withIOContext {
                         listDirectorySlim(source, password, relativeDir, cached.entries, configKey)
                     }
+                    ScanDiag.log(
+                        "slim dir=$relativeDir entries=${refresh.entries.size} " +
+                            "persist=${refresh.persist} " +
+                            "ms=${(System.nanoTime() - slimStart) / 1_000_000}",
+                    )
                     if (!refresh.persist) {
                         logcat("FolderIndex") {
                             "WebDAV slim ignored untrusted listing for source=${source.id} " +
@@ -182,6 +194,7 @@ object WebDavGateway {
             BrowseSession.invalidateWebDavListing(source.id, relativeDir)
         }
         // Cold miss: shallow-first (one PROPFIND → paint), then deferred peeks.
+        ScanDiag.log("cache MISS dir=$relativeDir useCache=$useCache → shallow+deep")
         return listDirectoryShallowThenDeep(source, password, relativeDir, configKey, onCached)
     }
 
@@ -201,6 +214,10 @@ object WebDavGateway {
         val children = withIOContext {
             listChildrenForRelativeDir(source, password, relativeDir)
         }
+        ScanDiag.log(
+            "children dir=$relativeDir count=${children.size} " +
+                "ms=${(System.nanoTime() - t0) / 1_000_000}",
+        )
         val dirName = relativeDir.substringAfterLast('/').ifEmpty { source.displayName }
         val shallowChildren = if (Settings.browseZipAsDir.value) {
             ZipAsDirListing.zipFilesAsPendingDirectories(children)
@@ -228,6 +245,10 @@ object WebDavGateway {
                 "children=${children.size} entries=${shallowMerged.size} " +
                 "ms=${(System.nanoTime() - t0) / 1_000_000}"
         }
+        ScanDiag.log(
+            "shallow dir=$relativeDir entries=${shallowMerged.size} " +
+                "ms=${(System.nanoTime() - t0) / 1_000_000}",
+        )
         onCached?.invoke(shallowMerged)
 
         BrowseSession.getWebDavCachedListing(source.id, relativeDir)?.let { cached ->
@@ -271,6 +292,11 @@ object WebDavGateway {
                     "WebDAV deep classify source=${source.id} dir=$relativeDir " +
                         "entries=${stored.size} ms=${(System.nanoTime() - t1) / 1_000_000}"
                 }
+                ScanDiag.log(
+                    "deep dir=$relativeDir entries=${stored.size} " +
+                        "ms=${(System.nanoTime() - t1) / 1_000_000} " +
+                        "total=${(System.nanoTime() - t0) / 1_000_000}",
+                )
                 stored
             }
         } catch (e: CancellationException) {
@@ -279,12 +305,14 @@ object WebDavGateway {
             logcat("FolderIndex") {
                 "WebDAV deep classify timed out source=${source.id} dir=$relativeDir; keeping shallow"
             }
+            ScanDiag.log("deep TIMEOUT dir=$relativeDir; keeping shallow")
             shallowMerged
         } catch (e: Throwable) {
             logcat("FolderIndex") {
                 "WebDAV deep classify failed source=${source.id} dir=$relativeDir " +
                     "(${e.message}); keeping shallow"
             }
+            ScanDiag.log("deep FAILED dir=$relativeDir (${e::class.simpleName}: ${e.message}); keeping shallow")
             shallowMerged
         }
     }
@@ -416,16 +444,6 @@ object WebDavGateway {
         )
     }
 
-    /**
-     * TEMPORARY diagnostic. The app's own [com.ehviewer.core.util.logcat] output does not
-     * reach Logcat in the self-install release build (`slimRelease`), so this writes through
-     * [android.util.Log] directly, the same way [WebDavClient] already does. Remove once the
-     * slow-folder question is settled.
-     */
-    private fun scanDiag(message: String) {
-        android.util.Log.i("LVScan", message)
-    }
-
     private suspend fun classifyDirectoryChildren(
         source: WebDavSourceEntity,
         password: String,
@@ -508,7 +526,7 @@ object WebDavGateway {
                             // paints is already its final shape.
                             peeks[c.name] = peek
                             publishPartial()
-                            scanDiag(
+                            ScanDiag.log(
                                 "chain dir=$relativeDir sub=${c.name} entries=${peek.size} " +
                                     "peekMs=$peekMs leaves=${leavesToPeek.size} " +
                                     "chainMs=${(System.nanoTime() - chainStart) / 1_000_000}",
@@ -517,7 +535,7 @@ object WebDavGateway {
                     }
                 }.awaitAll()
             }
-            scanDiag(
+            ScanDiag.log(
                 "chains done dir=$relativeDir children=${dirsToPeek.size} " +
                     "ms=${(System.nanoTime() - chainsStart) / 1_000_000}",
             )
@@ -528,7 +546,7 @@ object WebDavGateway {
         ) {
             val zipStart = System.nanoTime()
             val out = zipRootListings(source, password, relativeDir, children)
-            scanDiag(
+            ScanDiag.log(
                 "zip roots dir=$relativeDir zips=${out.size} " +
                     "ms=${(System.nanoTime() - zipStart) / 1_000_000}",
             )
@@ -755,8 +773,21 @@ object WebDavGateway {
         source: WebDavSourceEntity,
         password: String,
         relativeDir: String,
-    ): List<RemoteChild> = BrowseSession.rememberWebDavRawChildren(source.id, relativeDir) {
-        WebDavClient.listChildren(source, password, relativeDir)
+    ): List<RemoteChild> {
+        val start = System.nanoTime()
+        // `live` flips only when the loader actually runs: a hit returns from
+        // rememberWebDavRawChildren without touching the network.
+        var live = false
+        val children = BrowseSession.rememberWebDavRawChildren(source.id, relativeDir) {
+            live = true
+            WebDavClient.listChildren(source, password, relativeDir)
+        }
+        ScanDiag.log(
+            "propfind dir=$relativeDir count=${children.size} " +
+                "src=${if (live) "live" else "ram-cache"} " +
+                "ms=${(System.nanoTime() - start) / 1_000_000}",
+        )
+        return children
     }
 
     suspend fun listImageFileNames(
