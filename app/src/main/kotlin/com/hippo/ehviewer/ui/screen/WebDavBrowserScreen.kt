@@ -353,6 +353,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
     var refreshToken by remember { mutableStateOf(0) }
     var forceNextLoad by remember { mutableStateOf(false) }
 
+    /** See [WebDavGateway.listDirectory]'s `retryCoverless`. */
+    var retryCoverlessNextLoad by remember { mutableStateOf(false) }
+
     /**
      * True when the **currently shown** directory's child rows came from a live list in this
      * process — a successful full/slim list *or* the shallow paint that precedes the deferred
@@ -412,6 +415,11 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
 
     fun requestForceReload() {
         forceNextLoad = true
+        // Refresh means "heal the folders that came out with no thumbnail", not "throw the
+        // layer away": the gateway keeps children that already have a cover and re-peeks only
+        // the rest, so this costs a handful of PROPFINDs instead of restarting a layer that
+        // may hold hundreds of folders.
+        retryCoverlessNextLoad = true
         refreshToken++
     }
 
@@ -455,6 +463,8 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         val targetDir = relativeDir
         val force = forceNextLoad
         forceNextLoad = false
+        val retryCoverless = retryCoverlessNextLoad
+        retryCoverlessNextLoad = false
 
         val src = withIOContext { WebDavRepository.load(sourceId) }?.also { source = it } ?: run {
             error = "Source missing"
@@ -537,6 +547,8 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 password,
                 loadDir,
                 useCache = !force && !configChanged,
+                // A changed config means the cached rows belong to another server — full re-list.
+                retryCoverless = retryCoverless && !configChanged,
                 onCached = { cached ->
                     // The gateway list job is process-scoped: a paint can still land after this
                     // effect was cancelled by a path change. Ignore it instead of writing rows

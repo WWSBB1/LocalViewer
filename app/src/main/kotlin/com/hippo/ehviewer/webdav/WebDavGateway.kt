@@ -166,6 +166,12 @@ object WebDavGateway {
         relativeDir: String,
         useCache: Boolean = true,
         onCached: ((List<BrowseEntryRemote>) -> Unit)? = null,
+        /**
+         * Refresh semantics: keep the children that already have a thumbnail and re-peek only
+         * the ones that have none. Folders left without a cover by an earlier failed pass are
+         * exactly the cover-less ones, so this is what makes the refresh button heal them.
+         */
+        retryCoverless: Boolean = false,
     ): List<BrowseEntryRemote> {
         if (Settings.browseZipAsDir.value) {
             ZipAsDirListing.splitZipBrowsePath(relativeDir)?.let { (zipRel, inner) ->
@@ -181,6 +187,22 @@ object WebDavGateway {
             }
         }
         val configKey = sourceConfigKey(source)
+        // Read the cached rows *before* anything below invalidates them: the cover-less retry
+        // needs to know which children already have a thumbnail so it can leave them alone.
+        val coverlessRetryBaseline = if (retryCoverless) {
+            val cachedRows = BrowseSession.getWebDavCachedListing(source.id, relativeDir)?.entries
+                ?: NetworkFolderIndexCache.loadWebDav(source.id, configKey, relativeDir)
+            cachedRows
+                ?.filterNot { it is BrowseEntryRemote.Directory && it.isCoverless() }
+                ?.also { kept ->
+                    ScanDiag.log(
+                        "refresh dir=$relativeDir kept=${kept.size} " +
+                            "repeek=${cachedRows.size - kept.size}",
+                    )
+                }
+        } else {
+            null
+        }
         if (useCache) {
             val ram = BrowseSession.getWebDavCachedListing(source.id, relativeDir)
             val needDisk = ram == null || isShallowIncompleteListing(ram.entries)
@@ -281,21 +303,39 @@ object WebDavGateway {
         }
         // Cold miss: shallow-first (one PROPFIND → paint), then deferred peeks.
         ScanDiag.log("cache MISS dir=$relativeDir useCache=$useCache → shallow+deep")
-        return listDirectoryShallowThenDeep(source, password, relativeDir, configKey, onCached)
+        return listDirectoryShallowThenDeep(
+            source,
+            password,
+            relativeDir,
+            configKey,
+            onCached,
+            previousOverride = coverlessRetryBaseline,
+        )
     }
 
     /**
      * Cold list: publish name-only shallow rows immediately, then peek/classify.
      * Deep failure / timeout / cancel keeps shallow (`sessionCurrent=false`).
      */
+    /** Child row that ended up with no cover of any kind — the refresh button re-peeks these. */
+    private fun BrowseEntryRemote.Directory.isCoverless(): Boolean =
+        coverFileName == null && coverVideoFileName == null && coverArchiveFileName == null
+
     private suspend fun listDirectoryShallowThenDeep(
         source: WebDavSourceEntity,
         password: String,
         relativeDir: String,
         configKey: String,
         onCached: ((List<BrowseEntryRemote>) -> Unit)?,
+        /**
+         * Baseline for the resume machinery. Refresh passes the cached listing minus the
+         * cover-less rows, so [knownRowsOf] keeps only folders that already have a thumbnail
+         * and the rest are peeked again — a refresh costs a handful of PROPFINDs instead of
+         * restarting a layer that may hold hundreds of folders.
+         */
+        previousOverride: List<BrowseEntryRemote>? = null,
     ): List<BrowseEntryRemote> {
-        val previous = BrowseSession.getWebDavListing(source.id, relativeDir)
+        val previous = previousOverride ?: BrowseSession.getWebDavListing(source.id, relativeDir)
         val t0 = System.nanoTime()
         val children = withIOContext {
             listChildrenForRelativeDir(source, password, relativeDir)
