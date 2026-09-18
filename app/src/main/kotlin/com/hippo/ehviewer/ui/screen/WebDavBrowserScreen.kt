@@ -421,6 +421,10 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         // may hold hundreds of folders.
         retryCoverlessNextLoad = true
         refreshToken++
+        // A failed extract leaves a `.failed` marker that suppresses retries for minutes, so
+        // bumping refreshToken alone would change nothing for those videos. A deliberate
+        // refresh is exactly the moment to clear them and try again.
+        launchIO { VideoThumbnail.clearFailureMarkers() }
     }
 
     var prevZipAsDir by remember { mutableStateOf(browseZipAsDir) }
@@ -1597,6 +1601,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                                 knownSizeBytes = video.size,
                                             ),
                                             allowRemoteFetch = allowRemoteThumbs,
+                                            thumbRetryKey = refreshToken,
                                             onClick = { openVideoPrimary(video.fileName) },
                                             onLongClick = { openVideoSecondary(video.fileName) },
                                             overflow = videoOverflow(video.fileName),
@@ -1751,6 +1756,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                                 knownSizeBytes = video.size,
                                             ),
                                             allowRemoteFetch = allowRemoteThumbs,
+                                            thumbRetryKey = refreshToken,
                                             onClick = { openVideoPrimary(video.fileName) },
                                             onLongClick = { openVideoSecondary(video.fileName) },
                                             fileName = video.fileName,

@@ -558,6 +558,12 @@ fun BrowseVideoRow(
     fileName: String = name,
     sizeBytes: Long = 0L,
     lastModifiedMs: Long = 0L,
+    /**
+     * Bumped by the parent refresh to re-run the extract for a video whose thumb is still
+     * missing. Without it a re-list cannot retry: [thumbnailSource] is a value-equal data
+     * class, so the load effect would not restart.
+     */
+    thumbRetryKey: Any? = null,
     overflow: BrowseOverflowActions? = null,
 ) {
     val haptic = LocalHapticFeedback.current
@@ -579,6 +585,7 @@ fun BrowseVideoRow(
                 modifier = Modifier.size(56.dp).clip(ShapeDefaults.Medium),
                 iconSize = BrowseListLeadingIconSize,
                 allowRemoteFetch = allowRemoteFetch,
+                retryKey = thumbRetryKey,
             )
         },
         trailingContent = overflow?.let { actions ->
@@ -981,6 +988,8 @@ fun BrowseVideoGridItem(
     allowRemoteFetch: Boolean = true,
     /** Long-press → open in external app; defaults to [onClick]. */
     onLongClick: (() -> Unit)? = null,
+    /** Bumped by the parent refresh to re-run the extract for a still-missing thumb. */
+    thumbRetryKey: Any? = null,
     overflow: BrowseOverflowActions? = null,
 ) {
     BrowseGridCell(
@@ -995,6 +1004,7 @@ fun BrowseVideoGridItem(
                 Modifier.fillMaxSize(),
                 BrowseGridPlaceholderIconSize,
                 allowRemoteFetch,
+                thumbRetryKey,
             )
         },
     )
@@ -1006,13 +1016,14 @@ private fun BrowseVideoThumbnail(
     modifier: Modifier,
     iconSize: Dp,
     allowRemoteFetch: Boolean = true,
+    retryKey: Any? = null,
 ) {
     val context = LocalContext.current
     val downloadNetworkVideoThumbs by Settings.downloadNetworkVideoThumbs.collectAsState()
     var thumbnail by remember(source) { mutableStateOf<java.io.File?>(null) }
     // Disk first (same as gallery covers). Extract only on a live listing when
     // network video thumbs are enabled.
-    LaunchedEffect(source, downloadNetworkVideoThumbs, allowRemoteFetch) {
+    LaunchedEffect(source, downloadNetworkVideoThumbs, allowRemoteFetch, retryKey) {
         val src = source ?: run {
             thumbnail = null
             return@LaunchedEffect
