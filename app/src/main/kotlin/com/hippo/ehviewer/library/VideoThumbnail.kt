@@ -221,6 +221,13 @@ object VideoThumbnail {
         if (prev != null && prev != folderKey) {
             rotatePools("browse $prev → $folderKey")
         }
+        // TEMPORARY (see [ScanDiag]): the effective budgets, so a capture shows whether the
+        // thumbnail-concurrency setting actually reaches the video probe/decode semaphores.
+        // Budgets only — [Settings] reads are blocking DataStore calls and must not run on
+        // this (main-thread) path; see [ThumbConcurrency].
+        ScanDiag.log(
+            "video budget probe=${ThumbConcurrency.videoProbe()} decode=${ThumbConcurrency.videoDecode()}",
+        )
     }
 
     /**
