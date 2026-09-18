@@ -305,27 +305,38 @@ object VideoThumbnail {
         cachedIfPresent(source)?.let { return@withIOContext it }
         val target = File(directory, "$cacheKey.${OriginDiskCache.THUMB_EXT}")
         val failure = File(directory, "$cacheKey.failed")
-        if (shouldSkipFailed(failure)) return@withIOContext null
+        if (shouldSkipFailed(failure)) {
+            diag(source, "skip: failure marker")
+            return@withIOContext null
+        }
         if (source.isNetwork && !Settings.downloadNetworkVideoThumbs.value) {
+            diag(source, "skip: network thumbs off")
             return@withIOContext null
         }
 
         val mutex = pathLocks.getOrPut(source.cacheIdentity) { Mutex() }
         mutex.withLock {
             cachedIfPresent(source)?.let { return@withLock it }
-            if (shouldSkipFailed(failure)) return@withLock null
+            if (shouldSkipFailed(failure)) {
+                diag(source, "skip: failure marker (queued)")
+                return@withLock null
+            }
             if (source.isNetwork && !Settings.downloadNetworkVideoThumbs.value) {
+                diag(source, "skip: network thumbs off (queued)")
                 return@withLock null
             }
             if (source.isNetwork && networkPaused.get()) {
+                diag(source, "skip: app background")
                 logcat("VideoThumb") { "skip network thumb: app background" }
                 return@withLock null
             }
+            val startedNs = System.nanoTime()
             val frame = try {
                 extractThumbnailFrame(source, persistTarget = target)
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                diag(source, "extract threw ms=${elapsedMs(startedNs)} ${e.javaClass.simpleName}")
                 writeFailureMarker(failure)
                 return@withLock null
             }
@@ -333,15 +344,25 @@ object VideoThumbnail {
                 // May still land later via abandoned-waiter persist; don't mark failed yet
                 // if a late write could succeed — only mark when extract returned null after
                 // the worker finished (no pending native work for this call).
+                diag(source, "extract null ms=${elapsedMs(startedNs)}")
                 writeFailureMarker(failure)
                 return@withLock null
             }
             if (!persistThumb(target, frame)) {
+                diag(source, "persist failed ms=${elapsedMs(startedNs)}")
                 return@withLock null
             }
+            diag(source, "ok ms=${elapsedMs(startedNs)}")
             failure.delete()
             target
         }
+    }
+
+    private fun elapsedMs(startedNs: Long): Long = (System.nanoTime() - startedNs) / 1_000_000
+
+    /** TEMPORARY browse diagnostics — see [ScanDiag]. Extension + short hash, never a path. */
+    private fun diag(source: VideoThumbnailSource, message: String) {
+        ScanDiag.log("video ${privacyLogLabel(source)} $message")
     }
 
     private fun persistThumb(target: File, frame: Bitmap): Boolean {
@@ -579,6 +600,7 @@ object VideoThumbnail {
         try {
             probePool.execute(task)
         } catch (_: RejectedExecutionException) {
+            diag(source, "probe pool FULL active=${probePool.activeCount}/$PROBE_POOL_THREADS")
             logcat("VideoThumb") {
                 "probe pool full (${privacyLogLabel(source)}) active=${probePool.activeCount}"
             }
@@ -590,6 +612,7 @@ object VideoThumbnail {
         } catch (e: TimeoutCancellationException) {
             // Close remote to unblock stuck read; pool thread frees when worker finally runs.
             runCatching { raw.close() }
+            diag(source, "probe TIMEOUT ${PROBE_IO_TIMEOUT_MS}ms active=${probePool.activeCount}")
             logcat("VideoThumb") {
                 "probe timeout ${PROBE_IO_TIMEOUT_MS}ms (${privacyLogLabel(source)}) — " +
                     "abandon waiter (active=${probePool.activeCount})"
@@ -597,6 +620,7 @@ object VideoThumbnail {
             null
         } catch (e: CancellationException) {
             runCatching { raw.close() }
+            diag(source, "probe cancelled active=${probePool.activeCount}")
             logcat("VideoThumb") {
                 "probe cancel (${privacyLogLabel(source)}) — abandon waiter " +
                     "(active=${probePool.activeCount})"
@@ -902,6 +926,7 @@ object VideoThumbnail {
         try {
             decodePool.execute(task)
         } catch (_: RejectedExecutionException) {
+            ScanDiag.log("video $label decode pool FULL active=${decodePool.activeCount}/$DECODE_POOL_THREADS")
             logcat("VideoThumb") {
                 "decode pool full ($label) active=${decodePool.activeCount}/$DECODE_POOL_THREADS"
             }
@@ -914,6 +939,7 @@ object VideoThumbnail {
         } catch (e: TimeoutCancellationException) {
             cancelled.set(true)
             runCatching { onAbandon() }
+            ScanDiag.log("video $label mmr TIMEOUT ${timeoutMs}ms active=${decodePool.activeCount}")
             logcat("VideoThumb") {
                 "mmr timeout ${timeoutMs}ms ($label) — abandon waiter " +
                     "(active=${decodePool.activeCount})"
@@ -922,6 +948,7 @@ object VideoThumbnail {
         } catch (e: CancellationException) {
             cancelled.set(true)
             runCatching { onAbandon() }
+            ScanDiag.log("video $label mmr cancelled active=${decodePool.activeCount}")
             logcat("VideoThumb") {
                 "mmr cancel ($label) — abandon waiter (active=${decodePool.activeCount})"
             }
