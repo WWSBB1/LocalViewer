@@ -2,6 +2,7 @@ package com.hippo.ehviewer.library
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -176,6 +177,29 @@ class FolderCoverFallbackTest {
         )
         val packs = entries.filterIsInstance<BrowseEntryRemote.Directory>().single { it.name == "Packs" }
         assertEquals("vol.rar", packs.coverArchiveFileName)
+    }
+
+    /**
+     * Single-video folder: the video is lifted to a parent Videos row and this folder stays
+     * behind as a `PromotedShell`. The shell still needs its own cover — without it the row
+     * is stuck cover-less forever, which also makes every "refresh covers" pass count it as
+     * missing and re-peek it endlessly.
+     */
+    @Test
+    fun singleVideoFolder_shellStillCarriesItsCover() {
+        val entries = classifyRemoteListingWithPeeks(
+            currentDirName = "Library",
+            entries = listOf(RemoteChild(name = "Clip", isDirectory = true)),
+            childPeeks = mapOf(
+                "Clip" to listOf(RemoteChild(name = "only.mp4", isDirectory = false)),
+            ),
+        )
+        val clip = entries.filterIsInstance<BrowseEntryRemote.Directory>().single { it.name == "Clip" }
+        assertEquals(DirPresence.PromotedShell, clip.presence)
+        assertEquals("only.mp4", clip.coverVideoFileName)
+        assertTrue(
+            entries.filterIsInstance<BrowseEntryRemote.VideoFile>().any { it.fileName == "Clip/only.mp4" },
+        )
     }
 
     // --- leaf-peek cover resolution -----------------------------------------

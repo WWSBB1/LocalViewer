@@ -1440,6 +1440,12 @@ fun classifyRemoteListingWithPeeks(
                                     hasVideo = false,
                                     hasGallery = false,
                                     presence = DirPresence.PromotedShell,
+                                    // The single video was lifted to a parent Videos row, but this
+                                    // real folder still needs its own cover — frame 0 of that
+                                    // same video. Without it the row stays cover-less forever,
+                                    // which also makes every "refresh covers" pass re-peek it
+                                    // and report it as still missing.
+                                    coverVideoFileName = single,
                                     lastModifiedMs = e.lastModifiedMs,
                                     hidden = entryHidden,
                                 )
