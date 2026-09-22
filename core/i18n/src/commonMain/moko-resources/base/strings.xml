@@ -102,6 +102,16 @@
     <string name="browse_save_failed">Couldn\'t save</string>
     <string name="browse_saving_progress">%1$s  %2$s  %3$s/s</string>
     <string name="browse_save_cancelled">Cancelled</string>
+    <string name="browse_delete_mode">Delete mode</string>
+    <string name="browse_delete_mode_title">Enter delete mode?</string>
+    <string name="browse_delete_mode_message">Tapping an item deletes it. Long-press one item, then tap another, to delete everything in between.</string>
+    <string name="browse_delete_mode_hint">Tap to delete, long-press to start a range</string>
+    <string name="browse_delete_range_hint">Range start set — tap another item to delete everything between</string>
+    <string name="browse_delete_done">Deleted %d items</string>
+    <string name="browse_delete_partial">Deleted %1$d of %2$d — %3$d failed</string>
+    <string name="browse_delete_failed">Couldn\'t delete: %s</string>
+    <string name="browse_delete_protected">This item can\'t be deleted</string>
+    <string name="browse_delete_unsupported">Delete isn\'t available inside archives</string>
     <string name="browse_menu_favorites_on_top">Favorites on top</string>
     <string name="browse_menu_page_count">Page count</string>
     <string name="browse_menu_reading_progress">Reading progress</string>

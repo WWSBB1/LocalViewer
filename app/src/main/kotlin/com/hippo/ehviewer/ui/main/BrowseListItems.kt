@@ -1777,3 +1777,16 @@ fun BrowseEmptyHint(text: String, modifier: Modifier = Modifier) {
         Text(text = text, style = MaterialTheme.typography.bodyLarge)
     }
 }
+
+/**
+ * Highlight a browse row as the delete-mode range anchor.
+ *
+ * Applied through each row's existing [Modifier] slot, so no row composable needed a new
+ * parameter for it. [highlighted] false returns the receiver unchanged.
+ */
+@Composable
+fun Modifier.browseDeleteAnchor(highlighted: Boolean): Modifier = if (!highlighted) {
+    this
+} else {
+    this.background(MaterialTheme.colorScheme.errorContainer)
+}

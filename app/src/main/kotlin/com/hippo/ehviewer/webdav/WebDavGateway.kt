@@ -998,4 +998,98 @@ object WebDavGateway {
         }
         return WebDavClient.listImageFileNames(source, password, relativeDir)
     }
+
+    /**
+     * Delete [targets] (remote relative path → isDirectory) one by one.
+     *
+     * Never throws for a per-item failure: a range delete of forty files where one is locked
+     * must still remove the other thirty-nine, so failures are collected and returned.
+     * [kotlinx.coroutines.CancellationException] is rethrown — swallowing it here once turned
+     * a cancelled pass into thousands of bogus "this folder is empty" rows.
+     *
+     * Targets are filtered so no entry is deleted twice or survives as an orphan under a
+     * deleted parent, then ordered deepest-first: a range can span a promoted directory and
+     * its children, and removing children before their parent avoids 409/423 races.
+     */
+    suspend fun deleteEntries(
+        source: WebDavSourceEntity,
+        password: String,
+        targets: List<DeleteTarget>,
+    ): DeleteResult = withIOContext {
+        val work = normalizeDeleteTargets(targets)
+        if (work.isEmpty()) return@withIOContext DeleteResult(deleted = 0, failures = emptyList())
+
+        val failures = ArrayList<DeleteFailure>()
+        var deleted = 0
+        // Chunked rather than one coroutine per target: the client already gates each request
+        // on listSlots, so a flat fan-out would only pile up parked coroutines.
+        val budget = ThumbConcurrency.thumbBudget().coerceAtLeast(1)
+        for (chunk in work.chunked(budget)) {
+            coroutineContext.ensureActive()
+            val errors = chunk.map { target ->
+                async {
+                    try {
+                        WebDavClient.delete(source, password, target.remotePath, target.isDirectory)
+                        null
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        e
+                    }
+                }
+            }.awaitAll()
+            errors.forEachIndexed { i, error ->
+                if (error == null) {
+                    deleted++
+                } else {
+                    failures += DeleteFailure(
+                        remotePath = chunk[i].remotePath,
+                        message = error.message ?: error.toString(),
+                    )
+                }
+            }
+        }
+        DeleteResult(deleted = deleted, failures = failures)
+    }
+
+    /**
+     * Drop duplicates and any target nested under another target, then sort deepest-first.
+     * Deleting `A` makes every `A/…` entry a 404 at best and a race at worst.
+     */
+    internal fun normalizeDeleteTargets(targets: List<DeleteTarget>): List<DeleteTarget> {
+        val byPath = LinkedHashMap<String, DeleteTarget>()
+        for (target in targets) {
+            val path = target.remotePath.replace('\\', '/').trim('/')
+            if (path.isEmpty()) continue
+            if (path.split('/').any { it == ".." || it == "." }) continue
+            byPath.putIfAbsent(path, target.copy(remotePath = path))
+        }
+        val paths = byPath.keys
+        return byPath.values
+            .filterNot { target ->
+                paths.any { other ->
+                    other != target.remotePath && target.remotePath.startsWith("$other/")
+                }
+            }
+            .sortedByDescending { it.remotePath.count { c -> c == '/' } }
+    }
+}
+
+/** One WebDAV delete target: path relative to the share root, plus collection flag. */
+data class DeleteTarget(
+    val remotePath: String,
+    val isDirectory: Boolean,
+)
+
+data class DeleteFailure(
+    val remotePath: String,
+    val message: String,
+)
+
+data class DeleteResult(
+    val deleted: Int,
+    val failures: List<DeleteFailure>,
+) {
+    val requested: Int get() = deleted + failures.size
+    val isComplete: Boolean get() = failures.isEmpty()
 }

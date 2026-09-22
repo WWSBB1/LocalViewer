@@ -28,6 +28,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -131,6 +132,7 @@ import com.hippo.ehviewer.ui.main.BrowseSectionHeader
 import com.hippo.ehviewer.ui.main.BrowseVideoGridItem
 import com.hippo.ehviewer.ui.main.BrowseVideoRow
 import com.hippo.ehviewer.ui.main.GalleryGridDefaults
+import com.hippo.ehviewer.ui.main.browseDeleteAnchor
 import com.hippo.ehviewer.ui.main.rememberBrowseSectionCollapse
 import com.hippo.ehviewer.ui.navToReader
 import com.hippo.ehviewer.ui.navToWebDavFolderReader
@@ -139,6 +141,7 @@ import com.hippo.ehviewer.ui.tools.awaitConfirmationOrCancel
 import com.hippo.ehviewer.util.LocalNetworkPermission
 import com.hippo.ehviewer.util.addTextToClipboard
 import com.hippo.ehviewer.util.ensureLocalNetworkPermission
+import com.hippo.ehviewer.webdav.DeleteTarget
 import com.hippo.ehviewer.webdav.WebDavGateway
 import com.hippo.ehviewer.webdav.WebDavPasswordStore
 import com.hippo.ehviewer.webdav.WebDavRepository
@@ -284,6 +287,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
     }
     val search = rememberBrowseFolderSearchState()
     val focusManager = LocalFocusManager.current
+    val delete = rememberBrowseDeleteModeState()
     val showSmallGalleries by Settings.browseShowSmallGalleries.collectAsState()
     val smallGalleryMinPages by Settings.browseSmallGalleryMinPages.collectAsState()
     val showHiddenFiles by Settings.browseShowHiddenFiles.collectAsState()
@@ -427,7 +431,111 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         launchIO { VideoThumbnail.clearFailureMarkers() }
     }
 
+    // --- Delete mode ---
+
+    /**
+     * True inside a zip-as-dir virtual folder. Members there address no WebDAV node, and
+     * the server would read `album.zip/Album/page1.jpg` as a real filesystem path — so
+     * delete mode is refused outright rather than deleting something unintended.
+     */
+    val deleteUnsupported = remember(relativeDir, virtual, browseZipAsDir) {
+        virtual == BrowseVirtualKind.ZipPlainFolder ||
+            (browseZipAsDir && ZipAsDirListing.splitZipBrowsePath(relativeDir) != null)
+    }
+
+    fun notifyDeleteRejected(reason: BrowseDeleteReject) {
+        val message = when (reason) {
+            BrowseDeleteReject.InsideArchive -> context.getString(R.string.browse_delete_unsupported)
+            BrowseDeleteReject.Protected -> context.getString(R.string.browse_delete_protected)
+            BrowseDeleteReject.Virtual -> context.getString(R.string.browse_delete_protected)
+        }
+        launch { snackbar(message) }
+    }
+
+    /** Delete [selected] over WebDAV, then drop every cache that still holds them. */
+    fun performDelete(selected: List<BrowseEntryRemote>) {
+        if (selected.isEmpty() || delete.busy) return
+        val targets = ArrayList<DeleteTarget>(selected.size)
+        // A range never mixes deletable and non-deletable rows ([deleteRange] filters), but a
+        // single tap can hit one: report it instead of silently doing nothing.
+        for (entry in selected) {
+            browseDeleteUnsupportedReason(entry)?.let {
+                notifyDeleteRejected(it)
+                return
+            }
+            val remote = browseDeleteRemotePath(entry, relativeDir) ?: continue
+            if (remote.isEmpty()) continue
+            targets += DeleteTarget(remote, isDeletableDirectory(entry))
+        }
+        if (targets.isEmpty()) return
+        val src = source ?: return
+        val listedAt = relativeDir
+        delete.beginBatch()
+        launchIO {
+            val password = WebDavPasswordStore.get(src.id)
+            val result = runCatching {
+                WebDavGateway.deleteEntries(src, password, targets)
+            }
+            val outcome = result.getOrNull()
+            if (outcome != null) {
+                for (target in targets) {
+                    if (!target.isDirectory) continue
+                    BrowseSession.invalidateWebDavListingsUnder(src.id, target.remotePath)
+                    NetworkFolderIndexCache.removeWebDavUnder(src.id, target.remotePath)
+                }
+                // The parent key may be the share root, which removeWebDavUnder refuses to
+                // touch — drop it by exact key so the deleted row cannot come back on hydrate.
+                NetworkFolderIndexCache.removeWebDavListing(src.id, listedAt)
+            }
+            withUIContext {
+                if (outcome != null) {
+                    // Drop the deleted rows from the painted listing in place. Deletion is
+                    // local and finished — re-listing the directory would restart every cover
+                    // load (refreshToken feeds thumbRetryKey) for no reason.
+                    val gone = targets.mapTo(HashSet()) { it.remotePath }
+                    val remaining = entries.filterNot { entry ->
+                        val path = browseDeleteRemotePath(entry, listedAt) ?: return@filterNot false
+                        path in gone || gone.any { parent -> path.startsWith("$parent/") }
+                    }
+                    if (remaining.size != entries.size) {
+                        entries = remaining
+                        // Keep the session cache in step so leaving and re-entering the folder
+                        // does not rediscover the deleted rows from this process's cache.
+                        BrowseSession.putWebDavListing(
+                            src.id,
+                            listedAt,
+                            remaining,
+                            sessionCurrent = true,
+                        )
+                    }
+                }
+                delete.endBatch()
+                when {
+                    outcome == null -> Unit
+                    outcome.isComplete ->
+                        launch { snackbar(context.getString(R.string.browse_delete_done, outcome.deleted)) }
+                    else -> launch {
+                        snackbar(
+                            context.getString(
+                                R.string.browse_delete_partial,
+                                outcome.deleted,
+                                outcome.requested,
+                                outcome.failures.size,
+                            ),
+                        )
+                    }
+                }
+                result.exceptionOrNull()?.let { e ->
+                    launch {
+                        snackbar(context.getString(R.string.browse_delete_failed, e.message ?: e.toString()))
+                    }
+                }
+            }
+        }
+    }
+
     var prevZipAsDir by remember { mutableStateOf(browseZipAsDir) }
+
     LaunchedEffect(browseZipAsDir) {
         if (browseZipAsDir != prevZipAsDir) {
             prevZipAsDir = browseZipAsDir
@@ -456,6 +564,12 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
             refreshToken++
         }
         prevShowHidden = showHiddenFiles
+    }
+
+    // Delete mode is per-directory: entering/leaving a folder drops it, so goUp/enterDir
+    // need no per-call bookkeeping. Also covers entering a zip layer, where it is refused.
+    LaunchedEffect(sourceId, relativeDir) {
+        delete.exit()
     }
 
     // Single loader for the current path. When [relativeDir] changes, Compose cancels this
@@ -700,7 +814,11 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         if (hideBackToFab) jumpBackToOrigin() else goUp()
     }
 
-    BackHandler(enabled = search.active || segments.isNotEmpty() || photoGrid) {
+    // Delete mode first: leaving it must not also clear a typed filter or navigate up.
+    BackHandler(enabled = delete.active || search.active || segments.isNotEmpty() || photoGrid) {
+        if (delete.handleBack()) {
+            return@BackHandler
+        }
         if (!search.handleBack { focusManager.clearFocus() }) {
             goUp()
         }
@@ -1231,10 +1349,21 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    if (search.active) {
-                        BrowseTopBarSearchField(state = search, hint = searchHint)
-                    } else {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    when {
+                        search.active -> BrowseTopBarSearchField(state = search, hint = searchHint)
+                        // Delete mode states itself in the title (not as a list row) so
+                        // arming it never shifts the listing.
+                        delete.active -> Text(
+                            text = if (delete.rangeAnchorKey != null) {
+                                stringResource(R.string.browse_delete_range_hint)
+                            } else {
+                                stringResource(R.string.browse_delete_mode_hint)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        else -> Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
                 windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
@@ -1245,6 +1374,22 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                     }
                 },
                 actions = {
+                    BrowseDeleteModeAction(
+                        delete = delete,
+                        enabled = !deleteUnsupported,
+                        onEnter = {
+                            launch {
+                                awaitConfirmationOrCancel(
+                                    confirmText = R.string.delete,
+                                    title = R.string.browse_delete_mode_title,
+                                    text = {
+                                        Text(stringResource(id = R.string.browse_delete_mode_message))
+                                    },
+                                )
+                                delete.enter()
+                            }
+                        },
+                    )
                     BrowseTopBarSearchAction(
                         state = search,
                         onBeforeClose = { focusManager.clearFocus() },
@@ -1379,22 +1524,72 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                         )
                     // In-memory only; resets when dirKey changes. No prefs / no ripple on header.
                     val animateItems by Settings.animateItems.collectAsState()
-                    val (collapsedSections, toggleSection) = rememberBrowseSectionCollapse(
+                    val sectionCollapse = rememberBrowseSectionCollapse(
                         BrowseSession.webDavListingKey(sourceId, dirKey),
                     )
+                    val collapsedSections = sectionCollapse.first
+                    val toggleSection = sectionCollapse.second
 
                     // Keys must stay unique when dual-list + "this folder as gallery" share a name
                     // (e.g. parent/ff has images and a child dir also named ff → g-self vs g-child-ff).
-                    fun galleryKey(it: BrowseEntryRemote): String = when (it) {
-                        is BrowseEntryRemote.FolderGallery ->
-                            if (it.relativeName.isEmpty()) {
-                                "g-self"
+                    // Delegates to [browseDeleteKey] so the lazy keys and the delete range order
+                    // can never disagree.
+                    fun galleryKey(it: BrowseEntryRemote): String = browseDeleteKey(it)
+
+                    /**
+                     * What the user sees, top to bottom — the order a range deletes in.
+                     *
+                     * Photo-grid mode renders [folderImages] alone, so the section order would
+                     * find no matching key there and a range tap would silently do nothing.
+                     * Collapsed sections are omitted: a range never covers rows that are not
+                     * on screen.
+                     */
+                    val deleteOrder: List<BrowseEntryRemote> = if (photoGrid) {
+                        folderImages
+                    } else {
+                        buildList {
+                            if (BrowseFolderSection.Directories !in collapsedSections) addAll(dirs)
+                            if (BrowseFolderSection.Galleries !in collapsedSections) addAll(galleries)
+                            if (BrowseFolderSection.Videos !in collapsedSections) addAll(videos)
+                            if (BrowseFolderSection.Files !in collapsedSections) addAll(files)
+                        }
+                    }
+
+                    fun entryKeyOf(entry: BrowseEntryRemote): String = browseDeleteKey(entry)
+
+                    fun isAnchor(entry: BrowseEntryRemote): Boolean =
+                        delete.active && delete.rangeAnchorKey == entryKeyOf(entry)
+
+                    /** Tap: delete just this row, or the anchored range when one is set. */
+                    fun onEntryClick(entry: BrowseEntryRemote, normal: () -> Unit) {
+                        if (!delete.active) {
+                            normal()
+                            return
+                        }
+                        if (delete.busy) return
+                        val anchor = delete.rangeAnchorKey
+                        if (anchor == null) {
+                            performDelete(listOf(entry))
+                        } else {
+                            val range = deleteRange(deleteOrder, anchor, entryKeyOf(entry))
+                            // Nothing deletable between the two (all virtual/protected): drop
+                            // the anchor so the next tap is a plain single delete again.
+                            if (range.isEmpty()) {
+                                delete.clearAnchor()
                             } else {
-                                "g-child-${it.relativeName}"
+                                performDelete(range)
                             }
-                        is BrowseEntryRemote.ArchiveGallery ->
-                            "a-${it.parentRelativeName}/${it.fileName}"
-                        else -> "x-${it.name}"
+                        }
+                    }
+
+                    /** Long-press: set (or clear) the range anchor. */
+                    fun onEntryLongClick(entry: BrowseEntryRemote, normal: () -> Unit) {
+                        if (!delete.active) {
+                            normal()
+                            return
+                        }
+                        if (delete.busy) return
+                        delete.setAnchor(entryKeyOf(entry))
                     }
                     fun zipMemberCover(relativeName: String, coverFileName: String?): BrowseCover? {
                         if (!browseZipAsDir) return null
@@ -1479,14 +1674,16 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                         ) {
                             items(folderImages, key = { "pg-${it.fileName}" }) { file ->
                                 BrowsePhotoGridImageItem(
-                                    modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                    modifier = Modifier
+                                        .thenIf(animateItems) { animateItem() }
+                                        .browseDeleteAnchor(isAnchor(file)),
                                     name = file.name,
                                     cover = imageCoverFor(file),
                                     showPhotoThumb = true,
                                     allowRemoteFetch = allowRemoteThumbs,
-                                    onClick = { openFolderImage(file) },
-                                    onLongClick = { openExternalFile(file.fileName) },
-                                    overflow = fileOverflow(file.fileName),
+                                    onClick = { onEntryClick(file) { openFolderImage(file) } },
+                                    onLongClick = { onEntryLongClick(file) { openExternalFile(file.fileName) } },
+                                    overflow = if (delete.active) null else fileOverflow(file.fileName),
                                 )
                             }
                         }
@@ -1516,23 +1713,27 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                 if (BrowseFolderSection.Directories !in collapsedSections) {
                                     items(dirs, key = { "d-${it.relativeName}" }) { dir ->
                                         BrowseDirectoryGridItem(
-                                            modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                            modifier = Modifier
+                                                .thenIf(animateItems) { animateItem() }
+                                                .browseDeleteAnchor(isAnchor(dir)),
                                             name = dir.name,
-                                            onClick = { enterDir(dir.relativeName) },
+                                            onClick = { onEntryClick(dir) { enterDir(dir.relativeName) } },
                                             onLongClick = {
-                                                toggleDirFavorite(
-                                                    dir.relativeName,
-                                                    dir.coverFileName,
-                                                    dir.coverVideoFileName,
-                                                    dir.coverArchiveFileName,
-                                                )
+                                                onEntryLongClick(dir) {
+                                                    toggleDirFavorite(
+                                                        dir.relativeName,
+                                                        dir.coverFileName,
+                                                        dir.coverVideoFileName,
+                                                        dir.coverArchiveFileName,
+                                                    )
+                                                }
                                             },
                                             showFavoriteStar = isDirFavorite(dir.relativeName),
                                             cover = dirCoverFor(dir),
                                             showFolderThumb = browseFolderThumbs,
                                             thumbRetryKey = refreshToken,
                                             allowRemoteFetch = allowRemoteThumbs,
-                                            overflow = dirOverflow(dir.relativeName, dir.coverFileName),
+                                            overflow = if (delete.active) null else dirOverflow(dir.relativeName, dir.coverFileName),
                                         )
                                     }
                                 }
@@ -1552,7 +1753,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                         when (entry) {
                                             is BrowseEntryRemote.FolderGallery ->
                                                 BrowseFolderGalleryGridItem(
-                                                    modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                    modifier = Modifier
+                                                        .thenIf(animateItems) { animateItem() }
+                                                        .browseDeleteAnchor(isAnchor(entry)),
                                                     name = entry.name,
                                                     pageCount = entry.pageCount,
                                                     pageCountCapped = entry.pageCountCapped,
@@ -1560,20 +1763,22 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                                     thumbRetryKey = refreshToken,
                                                     allowRemoteFetch = allowRemoteThumbs,
                                                     showPages = showGalleryPages,
-                                                    onClick = { openFolderGalleryPrimary(entry) },
-                                                    onLongClick = { openFolderGallerySecondary(entry) },
-                                                    overflow = folderGalleryOverflow(entry),
+                                                    onClick = { onEntryClick(entry) { openFolderGalleryPrimary(entry) } },
+                                                    onLongClick = { onEntryLongClick(entry) { openFolderGallerySecondary(entry) } },
+                                                    overflow = if (delete.active) null else folderGalleryOverflow(entry),
                                                 )
                                             is BrowseEntryRemote.ArchiveGallery ->
                                                 BrowseArchiveGridItem(
-                                                    modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                    modifier = Modifier
+                                                        .thenIf(animateItems) { animateItem() }
+                                                        .browseDeleteAnchor(isAnchor(entry)),
                                                     name = entry.name,
                                                     cover = archiveCoverFor(entry),
                                                     thumbRetryKey = refreshToken,
                                                     allowRemoteFetch = allowRemoteThumbs,
-                                                    onClick = { openArchive(entry) },
-                                                    onLongClick = { openArchiveInOtherApp(entry) },
-                                                    overflow = archiveOverflow(entry),
+                                                    onClick = { onEntryClick(entry) { openArchive(entry) } },
+                                                    onLongClick = { onEntryLongClick(entry) { openArchiveInOtherApp(entry) } },
+                                                    overflow = if (delete.active) null else archiveOverflow(entry),
                                                 )
                                             else -> Unit
                                         }
@@ -1593,7 +1798,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                 if (BrowseFolderSection.Videos !in collapsedSections) {
                                     items(videos, key = { "v-${it.fileName}" }) { video ->
                                         BrowseVideoGridItem(
-                                            modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                            modifier = Modifier
+                                                .thenIf(animateItems) { animateItem() }
+                                                .browseDeleteAnchor(isAnchor(video)),
                                             name = video.name,
                                             thumbnailSource = VideoThumbnailSource.WebDav(
                                                 sourceId = sourceId,
@@ -1602,9 +1809,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                             ),
                                             allowRemoteFetch = allowRemoteThumbs,
                                             thumbRetryKey = refreshToken,
-                                            onClick = { openVideoPrimary(video.fileName) },
-                                            onLongClick = { openVideoSecondary(video.fileName) },
-                                            overflow = videoOverflow(video.fileName),
+                                            onClick = { onEntryClick(video) { openVideoPrimary(video.fileName) } },
+                                            onLongClick = { onEntryLongClick(video) { openVideoSecondary(video.fileName) } },
+                                            overflow = if (delete.active) null else videoOverflow(video.fileName),
                                         )
                                     }
                                 }
@@ -1622,24 +1829,27 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                 if (BrowseFolderSection.Files !in collapsedSections) {
                                     items(files, key = { "f-${it.fileName}" }) { file ->
                                         val isImage = isImageFileName(file.fileName.substringAfterLast('/'))
+                                        val fileMod = Modifier
+                                            .thenIf(animateItems) { animateItem() }
+                                            .browseDeleteAnchor(isAnchor(file))
                                         if (isImage) {
                                             BrowsePhotoGridImageItem(
-                                                modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                modifier = fileMod,
                                                 name = file.name,
                                                 cover = imageCoverFor(file),
                                                 showPhotoThumb = true,
                                                 allowRemoteFetch = allowRemoteThumbs,
-                                                onClick = { openFolderImage(file) },
-                                                onLongClick = { openExternalFile(file.fileName) },
-                                                overflow = fileOverflow(file.fileName),
+                                                onClick = { onEntryClick(file) { openFolderImage(file) } },
+                                                onLongClick = { onEntryLongClick(file) { openExternalFile(file.fileName) } },
+                                                overflow = if (delete.active) null else fileOverflow(file.fileName),
                                             )
                                         } else {
                                             BrowseFileGridItem(
-                                                modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                modifier = fileMod,
                                                 name = file.name,
-                                                onClick = { openExternalFile(file.fileName) },
-                                                onLongClick = { openExternalFile(file.fileName) },
-                                                overflow = fileOverflow(file.fileName),
+                                                onClick = { onEntryClick(file) { openExternalFile(file.fileName) } },
+                                                onLongClick = { onEntryLongClick(file) { openExternalFile(file.fileName) } },
+                                                overflow = if (delete.active) null else fileOverflow(file.fileName),
                                             )
                                         }
                                     }
@@ -1666,23 +1876,27 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                 if (BrowseFolderSection.Directories !in collapsedSections) {
                                     items(dirs, key = { "d-${it.relativeName}" }) { dir ->
                                         BrowseDirectoryRow(
-                                            modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                            modifier = Modifier
+                                                .thenIf(animateItems) { animateItem() }
+                                                .browseDeleteAnchor(isAnchor(dir)),
                                             name = dir.name,
-                                            onClick = { enterDir(dir.relativeName) },
+                                            onClick = { onEntryClick(dir) { enterDir(dir.relativeName) } },
                                             onLongClick = {
-                                                toggleDirFavorite(
-                                                    dir.relativeName,
-                                                    dir.coverFileName,
-                                                    dir.coverVideoFileName,
-                                                    dir.coverArchiveFileName,
-                                                )
+                                                onEntryLongClick(dir) {
+                                                    toggleDirFavorite(
+                                                        dir.relativeName,
+                                                        dir.coverFileName,
+                                                        dir.coverVideoFileName,
+                                                        dir.coverArchiveFileName,
+                                                    )
+                                                }
                                             },
                                             cover = dirCoverFor(dir),
                                             showFolderThumb = browseFolderThumbs,
                                             thumbRetryKey = refreshToken,
                                             allowRemoteFetch = allowRemoteThumbs,
                                             lastModifiedMs = dir.lastModifiedMs,
-                                            overflow = dirOverflow(dir.relativeName, dir.coverFileName),
+                                            overflow = if (delete.active) null else dirOverflow(dir.relativeName, dir.coverFileName),
                                             showFavoriteStar = isDirFavorite(dir.relativeName),
                                         )
                                     }
@@ -1703,7 +1917,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                         when (entry) {
                                             is BrowseEntryRemote.FolderGallery ->
                                                 BrowseFolderGalleryRow(
-                                                    modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                    modifier = Modifier
+                                                        .thenIf(animateItems) { animateItem() }
+                                                        .browseDeleteAnchor(isAnchor(entry)),
                                                     name = entry.name,
                                                     pageCount = entry.pageCount,
                                                     pageCountCapped = entry.pageCountCapped,
@@ -1711,24 +1927,26 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                                     thumbRetryKey = refreshToken,
                                                     allowRemoteFetch = allowRemoteThumbs,
                                                     showPages = showGalleryPages,
-                                                    onClick = { openFolderGalleryPrimary(entry) },
-                                                    onLongClick = { openFolderGallerySecondary(entry) },
+                                                    onClick = { onEntryClick(entry) { openFolderGalleryPrimary(entry) } },
+                                                    onLongClick = { onEntryLongClick(entry) { openFolderGallerySecondary(entry) } },
                                                     lastModifiedMs = entry.lastModifiedMs,
-                                                    overflow = folderGalleryOverflow(entry),
+                                                    overflow = if (delete.active) null else folderGalleryOverflow(entry),
                                                 )
                                             is BrowseEntryRemote.ArchiveGallery ->
                                                 BrowseArchiveGalleryRow(
-                                                    modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                                    modifier = Modifier
+                                                        .thenIf(animateItems) { animateItem() }
+                                                        .browseDeleteAnchor(isAnchor(entry)),
                                                     name = entry.name,
                                                     cover = archiveCoverFor(entry),
                                                     thumbRetryKey = refreshToken,
                                                     allowRemoteFetch = allowRemoteThumbs,
-                                                    onClick = { openArchive(entry) },
-                                                    onLongClick = { openArchiveInOtherApp(entry) },
+                                                    onClick = { onEntryClick(entry) { openArchive(entry) } },
+                                                    onLongClick = { onEntryLongClick(entry) { openArchiveInOtherApp(entry) } },
                                                     fileName = entry.fileName,
                                                     sizeBytes = entry.size,
                                                     lastModifiedMs = entry.lastModifiedMs,
-                                                    overflow = archiveOverflow(entry),
+                                                    overflow = if (delete.active) null else archiveOverflow(entry),
                                                 )
                                             else -> Unit
                                         }
@@ -1748,7 +1966,9 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                 if (BrowseFolderSection.Videos !in collapsedSections) {
                                     items(videos, key = { "v-${it.fileName}" }) { video ->
                                         BrowseVideoRow(
-                                            modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                            modifier = Modifier
+                                                .thenIf(animateItems) { animateItem() }
+                                                .browseDeleteAnchor(isAnchor(video)),
                                             name = video.name,
                                             thumbnailSource = VideoThumbnailSource.WebDav(
                                                 sourceId = sourceId,
@@ -1757,12 +1977,12 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                             ),
                                             allowRemoteFetch = allowRemoteThumbs,
                                             thumbRetryKey = refreshToken,
-                                            onClick = { openVideoPrimary(video.fileName) },
-                                            onLongClick = { openVideoSecondary(video.fileName) },
+                                            onClick = { onEntryClick(video) { openVideoPrimary(video.fileName) } },
+                                            onLongClick = { onEntryLongClick(video) { openVideoSecondary(video.fileName) } },
                                             fileName = video.fileName,
                                             sizeBytes = video.size,
                                             lastModifiedMs = video.lastModifiedMs,
-                                            overflow = videoOverflow(video.fileName),
+                                            overflow = if (delete.active) null else videoOverflow(video.fileName),
                                         )
                                     }
                                 }
@@ -1781,23 +2001,27 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                                     items(files, key = { "f-${it.fileName}" }) { file ->
                                         val isImage = isImageFileName(file.fileName.substringAfterLast('/'))
                                         BrowseFileRow(
-                                            modifier = Modifier.thenIf(animateItems) { animateItem() },
+                                            modifier = Modifier
+                                                .thenIf(animateItems) { animateItem() }
+                                                .browseDeleteAnchor(isAnchor(file)),
                                             name = file.name,
                                             cover = if (isImage) imageCoverFor(file) else null,
                                             showPhotoThumb = isImage,
                                             allowRemoteFetch = allowRemoteThumbs,
                                             onClick = {
-                                                if (isImage) {
-                                                    openFolderImage(file)
-                                                } else {
-                                                    openExternalFile(file.fileName)
+                                                onEntryClick(file) {
+                                                    if (isImage) {
+                                                        openFolderImage(file)
+                                                    } else {
+                                                        openExternalFile(file.fileName)
+                                                    }
                                                 }
                                             },
-                                            onLongClick = { openExternalFile(file.fileName) },
+                                            onLongClick = { onEntryLongClick(file) { openExternalFile(file.fileName) } },
                                             fileName = file.fileName,
                                             sizeBytes = file.size,
                                             lastModifiedMs = file.lastModifiedMs,
-                                            overflow = fileOverflow(file.fileName),
+                                            overflow = if (delete.active) null else fileOverflow(file.fileName),
                                         )
                                     }
                                 }

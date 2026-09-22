@@ -98,6 +98,16 @@
     <string name="browse_save_failed">无法保存</string>
     <string name="browse_saving_progress">%1$s  %2$s  %3$s/s</string>
     <string name="browse_save_cancelled">已取消</string>
+    <string name="browse_delete_mode">删除模式</string>
+    <string name="browse_delete_mode_title">进入删除模式？</string>
+    <string name="browse_delete_mode_message">点击条目即删除。长按一个条目后再点另一个，可删除两者之间的全部条目。</string>
+    <string name="browse_delete_mode_hint">点击删除，长按开始连选</string>
+    <string name="browse_delete_range_hint">已设起点——点击另一条目删除区间内全部内容</string>
+    <string name="browse_delete_done">已删除 %d 个条目</string>
+    <string name="browse_delete_partial">已删除 %1$d/%2$d，%3$d 个失败</string>
+    <string name="browse_delete_failed">删除失败：%s</string>
+    <string name="browse_delete_protected">无法删除此项</string>
+    <string name="browse_delete_unsupported">压缩包内不支持删除</string>
     <string name="browse_menu_favorites_on_top">收藏置顶</string>
     <string name="browse_menu_page_count">页数</string>
     <string name="browse_menu_reading_progress">阅读进度</string>

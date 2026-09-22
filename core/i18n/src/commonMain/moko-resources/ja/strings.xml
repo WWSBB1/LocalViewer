@@ -92,6 +92,16 @@
     <string name="browse_save_failed">保存できませんでした</string>
     <string name="browse_saving_progress">%1$s  %2$s  %3$s/s</string>
     <string name="browse_save_cancelled">キャンセルしました</string>
+    <string name="browse_delete_mode">削除モード</string>
+    <string name="browse_delete_mode_title">削除モードに入りますか？</string>
+    <string name="browse_delete_mode_message">タップした項目を削除します。1 つの項目を長押ししてから別の項目をタップすると、その間のすべてを削除します。</string>
+    <string name="browse_delete_mode_hint">タップで削除、長押しで範囲選択開始</string>
+    <string name="browse_delete_range_hint">始点を設定しました——別の項目をタップすると間をすべて削除します</string>
+    <string name="browse_delete_done">%d 件を削除しました</string>
+    <string name="browse_delete_partial">%2$d 件中 %1$d 件を削除、%3$d 件失敗</string>
+    <string name="browse_delete_failed">削除できませんでした：%s</string>
+    <string name="browse_delete_protected">この項目は削除できません</string>
+    <string name="browse_delete_unsupported">アーカイブ内では削除できません</string>
     <string name="settings_open_html_with_browser">HTML をブラウザで開く</string>
     <string name="settings_open_html_with_browser_summary">オン：HTML をタップするとフォルダをローカル HTTP で公開し、標準ブラウザで開きます。オフ：通常のファイルとして開きます。</string>
     <string name="settings_open_html_in_incognito">シークレットで開く</string>

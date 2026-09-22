@@ -87,6 +87,8 @@ import org.xmlpull.v1.XmlPullParserFactory
 object WebDavClient {
     private val PropFind = HttpMethod("PROPFIND")
 
+    private val Delete = HttpMethod("DELETE")
+
     private val PropfindBody = "" +
         "<?xml version=\"1.0\" encoding=\"utf-8\" ?>" +
         "<d:propfind xmlns:d=\"DAV:\">" +
@@ -424,7 +426,7 @@ object WebDavClient {
                 return true
             }
             // Explicit HTTP status from our own errors — do not retry 401/403/404.
-            if (msg.contains("WebDAV PROPFIND") || msg.contains("WebDAV GET")) {
+            if (msg.contains("WebDAV PROPFIND") || msg.contains("WebDAV GET") || msg.contains("WebDAV DELETE")) {
                 val code = Regex("""\b([45]\d\d)\b""").find(msg)?.groupValues?.getOrNull(1)?.toIntOrNull()
                 if (code != null && code in 400..499) return false
             }
@@ -534,6 +536,54 @@ object WebDavClient {
         .filter { !it.isDirectory && isImageFileName(it.name) }
         .map { it.name }
         .sortedWith { a, b -> naturalCompare(a, b) }
+
+    /**
+     * DELETE [relativePath] (a file, or a collection removed recursively).
+     *
+     * Gated on [listSlots] like PROPFIND — deleting is browse-tree maintenance, and sharing
+     * the gate with page/transfer downloads would fight active playback instead.
+     *
+     * Collections use [dirUrl] (trailing slash) and `Depth: infinity`: RFC 4918 §9.6.1
+     * requires infinity for collections, and `Depth: 0` on a collection is invalid. The
+     * header is omitted for plain files, where it is likewise invalid.
+     *
+     * A 404 is reported as success so a retried DELETE stays idempotent: [withTransportRetry]
+     * re-sends once on a transport blip, and the second attempt of an already-applied delete
+     * answers 404.
+     */
+    suspend fun delete(
+        source: WebDavSourceEntity,
+        password: String,
+        relativePath: String,
+        isDirectory: Boolean,
+    ) = withIOContext {
+        val rel = relativePath.replace('\\', '/').trim('/')
+        require(rel.isNotEmpty()) { "Refusing to delete the share root" }
+        require(rel.split('/').none { it == ".." || it == "." }) { "Invalid path $relativePath" }
+
+        listSlots.gate().withPermit {
+            withTransportRetry {
+                val url = if (isDirectory) dirUrl(source, rel) else absoluteUrl(source, rel)
+                val auth = basicAuthHeader(source.username, password)
+                val response = http().request(url) {
+                    method = Delete
+                    timeout {
+                        connectTimeoutMillis = LIST_CONNECT_MS
+                        requestTimeoutMillis = LIST_REQUEST_MS
+                        socketTimeoutMillis = LIST_SOCKET_MS
+                    }
+                    if (isDirectory) header("Depth", "infinity")
+                    auth?.let { header(HttpHeaders.Authorization, it) }
+                }
+                val code = response.status.value
+                // 204 No Content is canonical; 200 OK when the server returns a body.
+                // 404: already gone — success, or a retried delete would look like a failure.
+                if (code in 200..299 || code == 404) return@withTransportRetry
+                val body = runCatching { response.bodyAsText() }.getOrNull().orEmpty()
+                error("WebDAV DELETE $code: ${body.take(200)}")
+            }
+        }
+    }
 
     suspend fun downloadFile(
         source: WebDavSourceEntity,

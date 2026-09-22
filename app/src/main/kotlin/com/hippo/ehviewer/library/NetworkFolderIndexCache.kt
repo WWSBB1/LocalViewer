@@ -157,6 +157,16 @@ object NetworkFolderIndexCache {
 
     suspend fun removeLocalUnder(rootId: Long, relativeDir: String) = removeUnder("local", rootId, relativeDir)
 
+    /**
+     * Drop the stored listing of [relativeDir] even when it is the share root, which
+     * [removeUnder] refuses to touch (it guards against wiping a whole source).
+     *
+     * Needed after deleting a top-level entry: the parent key is `""` and no narrower key
+     * covers it, so without this the row survives on disk and comes back on the next hydrate.
+     */
+    suspend fun removeWebDavListing(sourceId: Long, relativeDir: String) =
+        removeKeys("webdav", sourceId, setOf(normalizeDir(relativeDir)))
+
     /** Drop every protocol file (current + legacy cacheDir) and process RAM listings. */
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         lock.withLock {
@@ -385,19 +395,40 @@ object NetworkFolderIndexCache {
         protocol: String,
         sourceId: Long,
         relativeDir: String,
-    ) = withContext(Dispatchers.IO) {
+    ) {
         val prefix = normalizeDir(relativeDir)
-        if (prefix.isEmpty()) return@withContext
+        if (prefix.isEmpty()) return
+        removeKeys(protocol, sourceId, setOf(prefix), includeNested = true)
+    }
+
+    /**
+     * Drop exactly the [keys] listings (plus nested ones when [includeNested]).
+     *
+     * Keys are stored normalized, so the root listing is the empty string. Unlike
+     * [removeUnder] an empty key is allowed here — the caller names the exact keys it wants
+     * gone instead of asking for "everything under a prefix".
+     */
+    private suspend fun removeKeys(
+        protocol: String,
+        sourceId: Long,
+        keys: Set<String>,
+        includeNested: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
+        if (keys.isEmpty()) return@withContext
         if (!Settings.networkFolderIndexCache.value) return@withContext
         lock.withLock {
             val file = fileFor(protocol, sourceId)
             val root = readRoot(file)?.takeIf { matchesVersion(it) } ?: return@withLock
             val folders = root.optJSONObject("folders") ?: return@withLock
             val stale = buildList {
-                val keys = folders.keys()
-                while (keys.hasNext()) {
-                    val keyName = keys.next()
-                    if (keyName == prefix || keyName.startsWith("$prefix/")) add(keyName)
+                val existing = folders.keys()
+                while (existing.hasNext()) {
+                    val keyName = existing.next()
+                    if (keyName in keys) {
+                        add(keyName)
+                    } else if (includeNested && keys.any { keyName.startsWith("$it/") }) {
+                        add(keyName)
+                    }
                 }
             }
             if (stale.isEmpty()) return@withLock

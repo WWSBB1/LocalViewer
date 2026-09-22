@@ -102,6 +102,16 @@
     <string name="browse_save_failed">無法儲存</string>
     <string name="browse_saving_progress">%1$s  %2$s  %3$s/s</string>
     <string name="browse_save_cancelled">已取消</string>
+    <string name="browse_delete_mode">刪除模式</string>
+    <string name="browse_delete_mode_title">進入刪除模式？</string>
+    <string name="browse_delete_mode_message">點擊項目即刪除。長按一個項目後再點另一個，可刪除兩者之間的全部項目。</string>
+    <string name="browse_delete_mode_hint">點擊刪除，長按開始連選</string>
+    <string name="browse_delete_range_hint">已設起點——點擊另一項目刪除區間內全部內容</string>
+    <string name="browse_delete_done">已刪除 %d 個項目</string>
+    <string name="browse_delete_partial">已刪除 %1$d/%2$d，%3$d 個失敗</string>
+    <string name="browse_delete_failed">刪除失敗：%s</string>
+    <string name="browse_delete_protected">無法刪除此項目</string>
+    <string name="browse_delete_unsupported">壓縮檔內不支援刪除</string>
     <string name="browse_menu_favorites_on_top">收藏置頂</string>
     <string name="browse_menu_page_count">頁數</string>
     <string name="browse_menu_reading_progress">閱讀進度</string>
