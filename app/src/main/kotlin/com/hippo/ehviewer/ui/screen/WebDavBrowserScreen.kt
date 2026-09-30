@@ -102,6 +102,7 @@ import com.hippo.ehviewer.library.isZipPlainFolderListing
 import com.hippo.ehviewer.library.joinRemoteArchivePath
 import com.hippo.ehviewer.library.mimeTypeForFileName
 import com.hippo.ehviewer.library.naturalCompare
+import com.hippo.ehviewer.library.selectCachedFolderListing
 import com.hippo.ehviewer.library.stableGalleryId
 import com.hippo.ehviewer.library.toRemoteBrowseSections
 import com.hippo.ehviewer.ui.DrawerHandle
@@ -470,6 +471,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         if (targets.isEmpty()) return
         val src = source ?: return
         val listedAt = relativeDir
+        val rowsAtRequest = entries
         delete.beginBatch()
         launchIO {
             val password = WebDavPasswordStore.get(src.id)
@@ -477,37 +479,71 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 WebDavGateway.deleteEntries(src, password, targets)
             }
             val outcome = result.getOrNull()
-            if (outcome != null) {
+            // [entries] is live Compose state and may by now show another directory, so read
+            // this key from the session listing instead — a deferred deep pass repaints both —
+            // and fall back to the rows painted when delete was requested. [entries] is not
+            // used directly: while a shallow paint sits in RAM it holds every dir as Pending,
+            // and persisting that would throw the complete index away.
+            val ram = BrowseSession.getWebDavCachedListing(src.id, listedAt)
+            val disk = NetworkFolderIndexCache.loadWebDav(
+                src.id,
+                WebDavGateway.sourceConfigKey(src),
+                listedAt,
+            )
+            val live = selectCachedFolderListing(
+                ramEntries = ram?.entries ?: rowsAtRequest,
+                ramSessionCurrent = ram?.sessionCurrent == true,
+                diskEntries = disk,
+            )?.first ?: rowsAtRequest
+            // Only rows whose DELETE actually reported success. A partial batch must not drop
+            // the rows the server refused — they are still there. outcome == null (the whole
+            // call threw) removes nothing at all.
+            val failed = outcome?.failures?.mapTo(HashSet()) { it.remotePath }.orEmpty()
+            val gone = if (outcome == null) {
+                emptySet()
+            } else {
+                targets.filter { it.remotePath !in failed }.mapTo(HashSet()) { it.remotePath }
+            }
+            val remaining = if (gone.isEmpty()) {
+                live
+            } else {
+                live.filterNot { entry ->
+                    val path = browseDeleteRemotePath(entry, listedAt) ?: return@filterNot false
+                    path in gone || gone.any { parent -> path.startsWith("$parent/") }
+                }
+            }
+            if (gone.isNotEmpty()) {
                 for (target in targets) {
-                    if (!target.isDirectory) continue
+                    if (!target.isDirectory || target.remotePath !in gone) continue
                     BrowseSession.invalidateWebDavListingsUnder(src.id, target.remotePath)
                     NetworkFolderIndexCache.removeWebDavUnder(src.id, target.remotePath)
                 }
-                // The parent key may be the share root, which removeWebDavUnder refuses to
-                // touch — drop it by exact key so the deleted row cannot come back on hydrate.
-                NetworkFolderIndexCache.removeWebDavListing(src.id, listedAt)
+                // Rewrite the parent listing with just the surviving rows. Dropping the whole
+                // key instead made every folder that was NOT deleted lose its scanned
+                // classification and cover, so the next visit re-listed and re-peeked the
+                // entire directory. Replacing also avoids the keep-previous merge putting the
+                // deleted rows back — including when the deleted row was the last directory.
+                NetworkFolderIndexCache.replaceWebDavListing(
+                    src.id,
+                    WebDavGateway.sourceConfigKey(src),
+                    listedAt,
+                    remaining,
+                )
+                // Keyed write, so it stays correct even if the user already left this folder.
+                BrowseSession.putWebDavListing(
+                    src.id,
+                    listedAt,
+                    remaining,
+                    sessionCurrent = true,
+                )
             }
             withUIContext {
-                if (outcome != null) {
-                    // Drop the deleted rows from the painted listing in place. Deletion is
-                    // local and finished — re-listing the directory would restart every cover
-                    // load (refreshToken feeds thumbRetryKey) for no reason.
-                    val gone = targets.mapTo(HashSet()) { it.remotePath }
-                    val remaining = entries.filterNot { entry ->
-                        val path = browseDeleteRemotePath(entry, listedAt) ?: return@filterNot false
-                        path in gone || gone.any { parent -> path.startsWith("$parent/") }
-                    }
-                    if (remaining.size != entries.size) {
-                        entries = remaining
-                        // Keep the session cache in step so leaving and re-entering the folder
-                        // does not rediscover the deleted rows from this process's cache.
-                        BrowseSession.putWebDavListing(
-                            src.id,
-                            listedAt,
-                            remaining,
-                            sessionCurrent = true,
-                        )
-                    }
+                if (gone.isNotEmpty() && remaining.size != entries.size &&
+                    currentRelativeDir.value == listedAt
+                ) {
+                    // Deletion is local and finished — re-listing the directory would restart
+                    // every cover load (refreshToken feeds thumbRetryKey) for no reason.
+                    entries = remaining
                 }
                 delete.endBatch()
                 when {

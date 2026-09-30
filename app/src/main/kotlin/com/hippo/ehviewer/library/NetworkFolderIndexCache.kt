@@ -158,14 +158,20 @@ object NetworkFolderIndexCache {
     suspend fun removeLocalUnder(rootId: Long, relativeDir: String) = removeUnder("local", rootId, relativeDir)
 
     /**
-     * Drop the stored listing of [relativeDir] even when it is the share root, which
-     * [removeUnder] refuses to touch (it guards against wiping a whole source).
+     * Overwrite the stored listing of [relativeDir] with exactly [entries].
      *
-     * Needed after deleting a top-level entry: the parent key is `""` and no narrower key
-     * covers it, so without this the row survives on disk and comes back on the next hydrate.
+     * Unlike [saveWebDav] this skips the keep-previous merge. A delete knows the exact
+     * remaining rows, and that merge would put the deleted ones straight back: an emptied
+     * directory keeps its old listing, and "previous had dirs, next has none" is precisely
+     * the case a slim re-list must not trust. Narrow on purpose — it never touches any other
+     * key, so the rows that stayed keep their scanned classification and their covers.
      */
-    suspend fun removeWebDavListing(sourceId: Long, relativeDir: String) =
-        removeKeys("webdav", sourceId, setOf(normalizeDir(relativeDir)))
+    suspend fun replaceWebDavListing(
+        sourceId: Long,
+        configKey: String,
+        relativeDir: String,
+        entries: List<BrowseEntryRemote>,
+    ) = replaceListing("webdav", sourceId, configKey, relativeDir, entries)
 
     /** Drop every protocol file (current + legacy cacheDir) and process RAM listings. */
     suspend fun clearAll() = withContext(Dispatchers.IO) {
@@ -446,6 +452,24 @@ object NetworkFolderIndexCache {
             } finally {
                 tmp.delete()
             }
+        }
+    }
+
+    /** Overwrite one key with [entries], no merge against the stored value. */
+    private suspend fun replaceListing(
+        protocol: String,
+        sourceId: Long,
+        configKey: String,
+        relativeDir: String,
+        entries: List<BrowseEntryRemote>,
+    ) = withContext(Dispatchers.IO) {
+        if (!Settings.networkFolderIndexCache.value) return@withContext
+        lock.withLock {
+            val file = fileFor(protocol, sourceId)
+            val root = mutableRoot(file, configKey)
+            val folders = root.getJSONObject("folders")
+            folders.put(normalizeDir(relativeDir), encodeEntries(entries))
+            writeRootFile(file, root)
         }
     }
 
