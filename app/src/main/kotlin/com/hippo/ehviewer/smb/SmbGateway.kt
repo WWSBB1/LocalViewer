@@ -2681,6 +2681,40 @@ object SmbGateway {
         }
     }
 
+    /**
+     * Delete one remote file (`relativeFilePath` under the share root).
+     *
+     * Unlike WebDAV there is no batch/range delete here: the player's delete action
+     * removes exactly the file it is playing. A missing file is **not** an error —
+     * SMB answers `STATUS_OBJECT_NAME_NOT_FOUND`, which the caller must read as
+     * "already gone" so a retried delete stays idempotent.
+     */
+    suspend fun deleteFile(
+        source: SmbSourceEntity,
+        password: String,
+        relativeFilePath: String,
+    ): Unit = withIOContext {
+        val rel = relativeFilePath.replace('\\', '/').trim('/')
+        require(rel.isNotEmpty()) { "Refusing to delete the share root" }
+        require(rel.split('/').none { it == ".." || it == "." }) { "Invalid path $relativeFilePath" }
+        val loc = resolveLocation(source, rel)
+        check(loc.pathInShare.isNotBlank()) { "Refusing to delete the share root" }
+        withShare(source, password, ShareOp.List, loc.share) { share ->
+            try {
+                share.rm(loc.pathInShare)
+            } catch (e: SMBApiException) {
+                // Already deleted (another client / a retried call) — success.
+                if (e.status == NtStatus.STATUS_OBJECT_NAME_NOT_FOUND ||
+                    e.status == NtStatus.STATUS_OBJECT_PATH_NOT_FOUND ||
+                    e.status == NtStatus.STATUS_DELETE_PENDING
+                ) {
+                    return@withShare
+                }
+                throw e
+            }
+        }
+    }
+
     private fun listChildrenLenient(share: DiskShare, path: String): List<RemoteChild> = try {
         listChildren(share, path)
     } catch (e: SMBApiException) {

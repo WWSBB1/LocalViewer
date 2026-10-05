@@ -112,6 +112,11 @@
     <string name="browse_delete_failed">Couldn\'t delete: %s</string>
     <string name="browse_delete_protected">This item can\'t be deleted</string>
     <string name="browse_delete_unsupported">Delete isn\'t available inside archives</string>
+    <string name="video_loop_on">Looping this video</string>
+    <string name="video_loop_off">Playing through the folder</string>
+    <string name="video_delete_current">Delete this video</string>
+    <string name="video_delete_title">Delete this video?</string>
+    <string name="video_delete_message">%s will be permanently deleted.</string>
     <string name="browse_menu_favorites_on_top">Favorites on top</string>
     <string name="browse_menu_page_count">Page count</string>
     <string name="browse_menu_reading_progress">Reading progress</string>

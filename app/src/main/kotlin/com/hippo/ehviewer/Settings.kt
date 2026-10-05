@@ -131,6 +131,13 @@ object Settings : DataStorePreferences(null) {
     val useMedia3Player = boolPref("use_media3_player", true)
 
     /**
+     * In-app player only: true (default) loops the video that is playing; false plays the
+     * whole folder playlist through and advances to the next video on end-of-file.
+     * Toggled from the player's own control bar.
+     */
+    val videoLoopCurrent = boolPref("video_loop_current", true)
+
+    /**
      * When true (default): tap HTML → loopback HTTP + default browser, serving the
      * parent directory (relative CSS/JS/images and subdir listings).
      * When false: tap treats HTML as a regular file (current open-with / streamdoc).

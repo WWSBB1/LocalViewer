@@ -102,6 +102,11 @@
     <string name="browse_delete_failed">削除できませんでした：%s</string>
     <string name="browse_delete_protected">この項目は削除できません</string>
     <string name="browse_delete_unsupported">アーカイブ内では削除できません</string>
+    <string name="video_loop_on">この動画を繰り返し再生中</string>
+    <string name="video_loop_off">フォルダーを連続再生中</string>
+    <string name="video_delete_current">この動画を削除</string>
+    <string name="video_delete_title">この動画を削除しますか？</string>
+    <string name="video_delete_message">%s を完全に削除します。</string>
     <string name="settings_open_html_with_browser">HTML をブラウザで開く</string>
     <string name="settings_open_html_with_browser_summary">オン：HTML をタップするとフォルダをローカル HTTP で公開し、標準ブラウザで開きます。オフ：通常のファイルとして開きます。</string>
     <string name="settings_open_html_in_incognito">シークレットで開く</string>

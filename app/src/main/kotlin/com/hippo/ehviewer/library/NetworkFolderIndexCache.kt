@@ -173,6 +173,22 @@ object NetworkFolderIndexCache {
         entries: List<BrowseEntryRemote>,
     ) = replaceListing("webdav", sourceId, configKey, relativeDir, entries)
 
+    /** @see replaceWebDavListing — same narrow overwrite for SMB. */
+    suspend fun replaceSmbListing(
+        sourceId: Long,
+        configKey: String,
+        relativeDir: String,
+        entries: List<BrowseEntryRemote>,
+    ) = replaceListing("smb", sourceId, configKey, relativeDir, entries)
+
+    /** @see replaceWebDavListing — same narrow overwrite for a local root. */
+    suspend fun replaceLocalListing(
+        rootId: Long,
+        configKey: String,
+        relativeDir: String,
+        entries: List<BrowseEntryRemote>,
+    ) = replaceListing("local", rootId, configKey, relativeDir, entries)
+
     /** Drop every protocol file (current + legacy cacheDir) and process RAM listings. */
     suspend fun clearAll() = withContext(Dispatchers.IO) {
         lock.withLock {

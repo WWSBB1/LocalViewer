@@ -1,5 +1,6 @@
 package com.hippo.ehviewer.ui
 
+import android.app.RecoverableSecurityException
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Context
@@ -7,19 +8,26 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import com.ehviewer.core.database.model.SmbSourceEntity
 import com.ehviewer.core.database.model.WebDavSourceEntity
+import com.ehviewer.core.files.delete
 import com.ehviewer.core.files.openFileDescriptor
 import com.ehviewer.core.i18n.R
 import com.ehviewer.core.util.logcat
 import com.ehviewer.core.util.withIOContext
 import com.ehviewer.core.util.withUIContext
 import com.hippo.ehviewer.Settings
+import com.hippo.ehviewer.library.ArchiveBrowseParent
 import com.hippo.ehviewer.library.BrowseEntryRemote
+import com.hippo.ehviewer.library.BrowseListingInvalidation
 import com.hippo.ehviewer.library.BrowseSession
+import com.hippo.ehviewer.library.LocalFolderListing
 import com.hippo.ehviewer.library.LocalHistory
+import com.hippo.ehviewer.library.LocalLibrary
+import com.hippo.ehviewer.library.MediaStoreFs
 import com.hippo.ehviewer.library.NetworkFolderIndexCache
 import com.hippo.ehviewer.library.SidecarSubtitles
 import com.hippo.ehviewer.library.VideoDirectLinkByteSource
@@ -27,8 +35,11 @@ import com.hippo.ehviewer.library.ZipMemberByteSource
 import com.hippo.ehviewer.library.ZipPaths
 import com.hippo.ehviewer.library.isBrowseVideoFileName
 import com.hippo.ehviewer.library.isHtmlFileName
+import com.hippo.ehviewer.library.isMediaStorePath
 import com.hippo.ehviewer.library.mimeTypeForFileName
 import com.hippo.ehviewer.library.openLocalArchiveByteSource
+import com.hippo.ehviewer.library.resolveBrowsePath
+import com.hippo.ehviewer.library.resolveRelative
 import com.hippo.ehviewer.library.withLocalZipCentralDirectory
 import com.hippo.ehviewer.provider.ExternalHttpStreamServer
 import com.hippo.ehviewer.provider.StreamDocumentProvider
@@ -54,7 +65,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okio.Path
 import okio.Path.Companion.toPath
+import splitties.init.appCtx
 
 /**
  * Open a non-gallery file (video, regular file, etc.).
@@ -96,6 +109,188 @@ object OpenFileExternally {
             runCatching { recordVideoPlaybackHistory(source) }
                 .onFailure { logcat("OpenFileExternally", it) }
         }
+    }
+
+    /**
+     * Delete the file behind [source] (in-app player's delete button).
+     *
+     * Throws when the delete fails so the caller can report it and leave playback alone.
+     * Each backend also drops its own browse listing caches for the parent directory —
+     * a stale listing would re-show the row the next time the user climbs back up.
+     */
+    suspend fun deleteInternalVideo(source: InternalVideoSource) {
+        when (source) {
+            is InternalVideoSource.Local -> deleteLocalVideoFile(source.path)
+            is InternalVideoSource.Smb -> {
+                val src = withIOContext {
+                    SmbRepository.load(source.sourceId) ?: throw IOException("SMB source missing")
+                }
+                val password = SmbPasswordStore.get(source.sourceId)
+                SmbGateway.deleteFile(src, password, source.remotePath)
+                invalidateSmbAfterFileDelete(src, source.remotePath)
+            }
+            is InternalVideoSource.WebDav -> {
+                val src = withIOContext {
+                    WebDavRepository.load(source.sourceId) ?: throw IOException("WebDAV source missing")
+                }
+                val password = WebDavPasswordStore.get(source.sourceId)
+                WebDavClient.delete(src, password, source.remotePath, isDirectory = false)
+                invalidateWebDavAfterFileDelete(src, source.remotePath)
+            }
+        }
+        // The player runs on top of the folder screen, which is paused off-composition and
+        // would otherwise keep painting the row we just removed.
+        BrowseListingInvalidation.onFileDeleted()
+    }
+
+    /**
+     * Local file delete. `mediastore:` files go through [MediaStoreFs.resolveContentUri] +
+     * ContentResolver (the standard route); everything else goes through the okio path,
+     * which covers physical roots and SAF trees alike. A zip-as-dir member addresses no
+     * real node and is refused.
+     *
+     * Library media the app does not own needs the user's consent on Android 11+; that
+     * surfaces as [DeleteConsentRequired] so the calling screen can show the system dialog
+     * and retry, instead of failing the delete outright.
+     */
+    private suspend fun deleteLocalVideoFile(path: String) {
+        if (ZipPaths.isZipPath(path)) throw IOException("Cannot delete a file inside an archive")
+        withIOContext {
+            val target = resolveBrowsePath(path.toPath())
+            // Resolve the owning root *before* deleting: afterwards the file is gone and a
+            // root lookup that stats the path would fail.
+            val root = LocalLibrary.resolveArchiveBrowseParent(path)
+            val rootEntity = root?.let { LocalLibrary.loadRoot(it.rootId) }
+            if (target.isMediaStorePath()) {
+                val uri = MediaStoreFs.resolveContentUri(target)
+                    ?: throw IOException("MediaStore entry not found: ${target.name}")
+                try {
+                    if (appCtx.contentResolver.delete(uri, null, null) <= 0) {
+                        throw IOException("Failed to delete ${target.name}")
+                    }
+                } catch (e: SecurityException) {
+                    // Not our entry: MediaStore wants an explicit user confirmation.
+                    val request = runCatching {
+                        MediaStore.createDeleteRequest(appCtx.contentResolver, listOf(uri))
+                    }.getOrNull() ?: throw IOException(e.message ?: "Delete denied", e)
+                    throw DeleteConsentRequired(request.intentSender)
+                }
+            } else {
+                try {
+                    target.delete()
+                } catch (e: RecoverableSecurityException) {
+                    throw DeleteConsentRequired(e.userAction.actionIntent.intentSender)
+                }
+            }
+            dropDeletedRowFromLocalListing(root, rootEntity?.prefersMediaStore, target)
+        }
+    }
+
+    /**
+     * Rewrite the parent listing without the deleted row so climbing back up cannot show it
+     * again, falling back to plain invalidation when the row is not addressable there.
+     *
+     * The rewrite matters: the persist path keeps the previous listing when the new one is
+     * empty ([com.hippo.ehviewer.library.shouldKeepPreviousFolderIndex]), so deleting the
+     * last file in a folder would otherwise leave a ghost row until a forced refresh.
+     */
+    private suspend fun dropDeletedRowFromLocalListing(
+        root: ArchiveBrowseParent?,
+        preferMediaStore: Boolean?,
+        deletedAbs: Path,
+    ) {
+        val parentAbs = deletedAbs.parent ?: deletedAbs
+        if (root != null) {
+            val preferMs = preferMediaStore ?: true
+            val parentPath = root.rootPath.resolveRelative(root.parentRelativePath)
+            val effective = resolveBrowsePath(parentPath, preferMediaStore = preferMs)
+            val configKey = LocalFolderListing.rootConfigKey(root.rootPath, preferMs)
+            val listed = BrowseSession.getLocalCachedListing(BrowseSession.pathKey(effective))?.entries
+                ?: NetworkFolderIndexCache.loadLocal(root.rootId, configKey, root.parentRelativePath)
+            val remaining = listed?.let { stripDeletedVideoRow(it, deletedAbs.name) }
+            if (remaining != null) {
+                NetworkFolderIndexCache.replaceLocalListing(
+                    root.rootId,
+                    configKey,
+                    root.parentRelativePath,
+                    remaining,
+                )
+                BrowseSession.putLocalListing(
+                    BrowseSession.pathKey(effective),
+                    remaining,
+                    sessionCurrent = true,
+                )
+                return
+            }
+            BrowseSession.invalidateLocalListing(BrowseSession.pathKey(effective))
+            NetworkFolderIndexCache.removeLocalUnder(root.rootId, root.parentRelativePath)
+            return
+        }
+        // File outside every configured root: the parent is only known by absolute path.
+        BrowseSession.invalidateLocalListing(BrowseSession.pathKey(parentAbs))
+    }
+
+    /**
+     * Remove the direct (leaf) row for [fileName], leaving promoted / multi-segment rows
+     * alone — those address paths that this one delete does not own.
+     * Returns null when nothing matched, so the caller can fall back to a re-list.
+     */
+    private fun stripDeletedVideoRow(
+        entries: List<BrowseEntryRemote>,
+        fileName: String,
+    ): List<BrowseEntryRemote>? {
+        val remaining = entries.filterNot { entry ->
+            !entry.virtual && entry is BrowseEntryRemote.VideoFile &&
+                entry.fileName.replace('\\', '/').trim('/') == fileName
+        }
+        return remaining.takeIf { it.size != entries.size }
+    }
+
+    /** Rewrite the parent SMB listing without the deleted row. @see dropDeletedRowFromLocalListing */
+    private suspend fun invalidateSmbAfterFileDelete(src: SmbSourceEntity, remoteFile: String) {
+        val parent = parentRelativeOf(remoteFile)
+        val configKey = SmbGateway.sourceConfigKey(src)
+        val listed = BrowseSession.getSmbCachedListing(src.id, parent)?.entries
+            ?: NetworkFolderIndexCache.loadSmb(src.id, configKey, parent)
+        val remaining = listed?.let { stripDeletedVideoRow(it, leafOf(remoteFile)) }
+        if (remaining != null) {
+            NetworkFolderIndexCache.replaceSmbListing(src.id, configKey, parent, remaining)
+            BrowseSession.putSmbListing(src.id, parent, remaining, sessionCurrent = true)
+            return
+        }
+        BrowseSession.invalidateSmbListing(src.id, parent)
+        NetworkFolderIndexCache.removeSmbUnder(src.id, parent)
+    }
+
+    /** Rewrite the parent WebDAV listing without the deleted row. @see dropDeletedRowFromLocalListing */
+    private suspend fun invalidateWebDavAfterFileDelete(src: WebDavSourceEntity, remoteFile: String) {
+        val parent = parentRelativeOf(remoteFile)
+        val configKey = WebDavGateway.sourceConfigKey(src)
+        val listed = BrowseSession.getWebDavCachedListing(src.id, parent)?.entries
+            ?: NetworkFolderIndexCache.loadWebDav(src.id, configKey, parent)
+        val remaining = listed?.let { stripDeletedVideoRow(it, leafOf(remoteFile)) }
+        if (remaining != null) {
+            NetworkFolderIndexCache.replaceWebDavListing(src.id, configKey, parent, remaining)
+            BrowseSession.putWebDavListing(src.id, parent, remaining, sessionCurrent = true)
+            return
+        }
+        BrowseSession.invalidateWebDavListing(src.id, parent)
+        NetworkFolderIndexCache.removeWebDavUnder(src.id, parent)
+    }
+
+    private fun parentRelativeOf(remoteFile: String): String =
+        remoteFile.replace('\\', '/').trim('/').substringBeforeLast('/', missingDelimiterValue = "")
+
+    private fun leafOf(remoteFile: String): String =
+        remoteFile.replace('\\', '/').trim('/').substringAfterLast('/')
+
+    /**
+     * Retry a local delete after the user granted consent through the system dialog.
+     * [deleteLocalVideoFile] is re-run as-is: it resolves the root, unlinks, and drops the
+     * stale row. Any further failure is a real one and reaches the caller unchanged.
+     */
+    suspend fun retryLocalVideoDelete(source: InternalVideoSource.Local) {
+        deleteLocalVideoFile(source.path)
     }
 
     suspend fun openLocal(
@@ -1756,3 +1951,13 @@ object OpenFileExternally {
 
     private const val PLAYLIST_MIME = "video/x-mpegurl"
 }
+
+/**
+ * Deleting a local file needs the user's explicit consent (Android 11+ scoped storage).
+ *
+ * [intentSender] belongs to the platform's delete-confirmation activity; the caller starts
+ * it, and on a successful result retries via [OpenFileExternally.retryLocalVideoDelete].
+ */
+class DeleteConsentRequired(
+    val intentSender: android.content.IntentSender,
+) : Exception("Delete needs user confirmation")

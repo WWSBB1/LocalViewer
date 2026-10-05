@@ -73,6 +73,7 @@ import com.hippo.ehviewer.library.BrowseContentMode
 import com.hippo.ehviewer.library.BrowseEntry
 import com.hippo.ehviewer.library.BrowseFavorites
 import com.hippo.ehviewer.library.BrowseFolderId
+import com.hippo.ehviewer.library.BrowseListingInvalidation
 import com.hippo.ehviewer.library.BrowseSession
 import com.hippo.ehviewer.library.BrowseVirtualKind
 import com.hippo.ehviewer.library.EmptyArchiveRegistry
@@ -520,14 +521,28 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
         }
     }
 
-    LaunchedEffect(stack) {
+    // The player's delete button runs while this screen is paused beneath it: the stack is
+    // unchanged, so without this key the effect would never re-run and the removed row would
+    // stay on screen. The caches were already rewritten, so this paints the surviving rows.
+    val fileDeletedRev by BrowseListingInvalidation.revision.collectAsState()
+    var listedFileDeletedRev by remember { mutableIntStateOf(fileDeletedRev) }
+
+    LaunchedEffect(stack, fileDeletedRev) {
         if (skipNextListing) {
             skipNextListing = false
             loading = false
             refreshing = false
             return@LaunchedEffect
         }
-        reload(force = false)
+        // A delete must not be served from the photo-grid short circuit: it treats any
+        // already-painted rows as complete (see its `alreadyShown` check), so it would keep
+        // the removed row. A normal folder needs no force — the rewritten cache already
+        // holds the surviving rows and [reload] paints it without a scan.
+        val deletedSince = fileDeletedRev != listedFileDeletedRev
+        listedFileDeletedRev = fileDeletedRev
+        val frame = stack.lastOrNull()
+        val force = deletedSince && frame?.photoGrid == true
+        reload(force = force)
     }
 
     // Zip-as-dir toggle: re-materialize so ArchiveGallery ↔ Folder/Directory updates without

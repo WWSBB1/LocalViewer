@@ -5,6 +5,42 @@
     android:layout_height="match_parent"
     android:layoutDirection="ltr">
 
+    <!--
+      Loop / delete live in their own top bar. They are children of the controller, so
+      SeekPlayerView fades them together with the bottom bar on tap.
+    -->
+    <LinearLayout
+        android:id="@+id/video_top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:background="@drawable/video_player_controls_gradient_top"
+        android:gravity="end|center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="16dp">
+
+        <ImageButton
+            android:id="@+id/video_loop"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="12dp"
+            android:src="@drawable/ic_video_loop"
+            android:tint="@android:color/white" />
+
+        <ImageButton
+            android:id="@+id/video_delete"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="12dp"
+            android:src="@drawable/ic_video_delete"
+            android:tint="@android:color/white" />
+
+    </LinearLayout>
+
     <LinearLayout
         android:id="@id/exo_bottom_bar"
         android:layout_width="match_parent"

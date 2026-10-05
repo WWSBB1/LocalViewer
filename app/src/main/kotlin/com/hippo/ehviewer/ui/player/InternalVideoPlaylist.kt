@@ -75,6 +75,19 @@ object InternalVideoPlaylistRegistry {
 
     fun get(id: String?): Session? = id?.let(sessions::get)
 
+    /**
+     * Drop the item at [index] (player delete action) and return the item that slides into
+     * that index — the next video under the same continuous-play order — or null when the
+     * removed one was the last.
+     */
+    fun removeItem(id: String?, index: Int): InternalVideoSource? {
+        val session = id?.let(sessions::get) ?: return null
+        if (index !in session.items.indices) return null
+        val remaining = session.items.toMutableList().also { it.removeAt(index) }
+        sessions[id] = session.copy(items = remaining)
+        return remaining.getOrNull(index)
+    }
+
     fun remove(id: String?) {
         if (id != null) sessions.remove(id)
     }

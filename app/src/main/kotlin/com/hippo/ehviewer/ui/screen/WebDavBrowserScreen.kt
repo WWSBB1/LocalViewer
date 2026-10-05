@@ -72,6 +72,7 @@ import com.hippo.ehviewer.library.BrowseContentMode
 import com.hippo.ehviewer.library.BrowseEntryRemote
 import com.hippo.ehviewer.library.BrowseFavorites
 import com.hippo.ehviewer.library.BrowseFolderId
+import com.hippo.ehviewer.library.BrowseListingInvalidation
 import com.hippo.ehviewer.library.BrowseSession
 import com.hippo.ehviewer.library.BrowseVirtualKind
 import com.hippo.ehviewer.library.EmptyArchiveRegistry
@@ -608,11 +609,15 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
         delete.exit()
     }
 
+    // A delete done in the player repaints this screen even though our own ON_RESUME handler
+    // only bumps the token for a source edit (see the resume observer above).
+    val fileDeletedRev by BrowseListingInvalidation.revision.collectAsState()
+
     // Single loader for the current path. When [relativeDir] changes, Compose cancels this
     // effect and starts a new one — that is the only concurrency control we need.
     // Previous epoch/ON_RESUME races could ++epoch, early-return without clearing loading,
     // and leave History→up→up stuck on an empty infinite spinner (manual refresh worked).
-    LaunchedEffect(sourceId, relativeDir, refreshToken) {
+    LaunchedEffect(sourceId, relativeDir, refreshToken, fileDeletedRev) {
         VideoThumbnail.onBrowseFolderChanged("dav:$sourceId:$relativeDir")
         val targetDir = relativeDir
         val force = forceNextLoad

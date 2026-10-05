@@ -108,6 +108,11 @@
     <string name="browse_delete_failed">删除失败：%s</string>
     <string name="browse_delete_protected">无法删除此项</string>
     <string name="browse_delete_unsupported">压缩包内不支持删除</string>
+    <string name="video_loop_on">正在循环播放当前视频</string>
+    <string name="video_loop_off">正在连续播放文件夹</string>
+    <string name="video_delete_current">删除当前视频</string>
+    <string name="video_delete_title">删除当前视频？</string>
+    <string name="video_delete_message">将永久删除 %s。</string>
     <string name="browse_menu_favorites_on_top">收藏置顶</string>
     <string name="browse_menu_page_count">页数</string>
     <string name="browse_menu_reading_progress">阅读进度</string>
