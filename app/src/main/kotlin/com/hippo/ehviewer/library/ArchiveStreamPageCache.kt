@@ -124,7 +124,12 @@ object ArchiveStreamPageCache {
         }
     }
 
-    const val INDEX_VERSION: Int = 3
+    /**
+     * v4: ZIP members are numbered in natural name order from **every** writer (cover
+     * fast path included). v3-and-earlier ZIP tables could hold central-directory order,
+     * which made the reader show 1,10,2 — [loadIndex] purges those dirs.
+     */
+    const val INDEX_VERSION: Int = 4
 
     fun dirFor(cacheKey: String): Path = root / sha256Hex(cacheKey)
 
@@ -174,9 +179,17 @@ object ArchiveStreamPageCache {
     fun loadIndex(cacheKey: String): Index? {
         val f = File(indexPath(cacheKey).toString())
         if (!f.isFile || f.length() == 0L) return null
-        return runCatching {
+        val idx = runCatching {
             json.decodeFromString(Index.serializer(), f.readText())
-        }.getOrNull()
+        }.getOrNull() ?: return null
+        // Pre-v4 ZIP tables listed members in central-directory order; page files are
+        // named by that order, so the whole dir must go, not just the index. TAR/other
+        // formats numbered members by discovery order in every writer, so they stay valid.
+        if (idx.v < INDEX_VERSION && idx.format == "zip") {
+            purge(cacheKey)
+            return null
+        }
+        return idx
     }
 
     private val indexWriteLocks = ConcurrentHashMap<String, Any>()

@@ -502,7 +502,7 @@ object ArchiveCoverCache {
                                             bridge,
                                             archiveSize,
                                             /* sortEntries = */
-                                            false,
+                                            isZip,
                                             /* coverOnly = */
                                             !isZip,
                                             /* progressiveTar = */
@@ -609,9 +609,10 @@ object ArchiveCoverCache {
     /**
      * Page 0 of a ZIP via [ZipCentralDirectory] (EOCD + CD + store/deflate).
      *
-     * Member choice mirrors native `openArchiveStream(coverOnly = false)` for ZIP: the
-     * **first playable entry in CD order** (native image ext, no `__MACOSX`/AppleDouble,
-     * store/deflate, `0 < size < 2 GiB`).
+     * Member choice mirrors native `openArchiveStream(sortEntries = true)` for ZIP: the
+     * **first playable entry in natural name order** (native image ext, no
+     * `__MACOSX`/AppleDouble, store/deflate, `0 < size < 2 GiB`) — the same page the
+     * reader will show first, so the grid thumb and page 0 cannot disagree.
      */
     private suspend fun zipCoverBytesFromCd(
         cacheKey: String,
@@ -620,7 +621,9 @@ object ArchiveCoverCache {
         openSource().use { source ->
             val size = runCatching { source.size }.getOrDefault(0L)
             val cd = ZipCentralDirectory.open(source) ?: return@use null
-            val cover = cd.entries.firstOrNull(::isZipCoverEntry) ?: return@use null
+            val cover = cd.entries.filter(::isZipCoverEntry)
+                .minWithOrNull { a, b -> naturalCompare(a.name, b.name) }
+                ?: return@use null
             // Encrypted / oversized members: let the native path decide (same as before).
             if (cover.isEncrypted || cover.uncompressedSize > ZIP_COVER_MAX_BYTES) return@use null
             val bytes = cd.extract(cover, ZIP_COVER_MAX_BYTES) ?: return@use null
@@ -637,8 +640,9 @@ object ArchiveCoverCache {
 
     /**
      * Persist the ZIP CD as a seek table exactly like [persistZipSeekIndex] does from the
-     * native entry list (playable members, CD order, local-header offsets), so opening the
-     * gallery still skips the EOCD/CD parse. Skipped when a usable index already exists.
+     * native entry list (playable members, natural name order, local-header offsets), so
+     * opening the gallery still skips the EOCD/CD parse. Skipped when a usable index
+     * already exists.
      */
     private fun persistZipCdIndexIfAbsent(
         cacheKey: String,
@@ -651,10 +655,14 @@ object ArchiveCoverCache {
         ) {
             return
         }
-        val members = ArrayList<ArchiveStreamPageCache.Member>(entries.size)
+        // Page order must match every other entry point (local mmap open, local seek
+        // index, listing covers): natural name order. Central-directory order would make
+        // the reader show 1,10,2 on archives whose CD was not written sorted.
+        val playable = entries.filter(::isZipCoverEntry)
+            .sortedWith { a, b -> naturalCompare(a.name, b.name) }
+        val members = ArrayList<ArchiveStreamPageCache.Member>(playable.size)
         var i = 0
-        for (e in entries) {
-            if (!isZipCoverEntry(e)) continue
+        for (e in playable) {
             members += ArchiveStreamPageCache.Member(
                 i = i,
                 name = "",
