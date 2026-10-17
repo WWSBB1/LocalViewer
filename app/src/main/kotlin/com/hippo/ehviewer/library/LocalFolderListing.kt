@@ -41,16 +41,24 @@ object LocalFolderListing {
         useCache: Boolean = true,
         preferMediaStore: Boolean = true,
     ): List<BrowseEntry> = withContext(Dispatchers.IO) {
+        // Two identities on purpose:
+        //  - `effective` (MediaStore twin) keys RAM/disk listings, so a SAF folder and its
+        //    `mediastore:` twin share one cache entry.
+        //  - `safDir` is what actually gets enumerated. Listing through the MediaStore path
+        //    would hide archives, unindexed folders and non-media files; the SAF path lets
+        //    [BrowseFs.forEachSafChild] overlay the index and fall back to SAF for the rest.
         val effective = resolveBrowsePath(dir, preferMediaStore = preferMediaStore)
+        val safDir = if (effective.isMediaStorePath()) dir else effective
         val key = BrowseSession.pathKey(effective)
         if (useCache) {
             BrowseSession.getLocalListing(key)?.let { return@withContext it }
         }
-        val remote = listDirectoryUncachedRemote(effective, preferMediaStore)
+        val remote = listDirectoryUncachedRemote(safDir, preferMediaStore)
         // Not session-current: this path does not persist to NetworkFolderIndexCache.
         // Leaving current=false lets folder UI listDirectory hydrate/save + quick-scan.
         BrowseSession.putLocalListing(key, remote, sessionCurrent = false)
-        materializeLocalEntries(effective, remote)
+        // Rows address the SAF tree, which is what the opened folder actually is.
+        materializeLocalEntries(dir, remote)
     }
 
     /**
@@ -176,6 +184,10 @@ object LocalFolderListing {
         val effective = resolveBrowsePath(listedPath, preferMediaStore = preferMediaStore)
         val pathKey = BrowseSession.pathKey(effective)
         val configKey = rootConfigKey(rootPath, preferMediaStore)
+        // The cache key is the MediaStore twin (a SAF folder and its `mediastore:` alias
+        // share one entry), but everything the user can act on — rows, enter-dir, open-file
+        // — must stay on the SAF tree that was actually enumerated.
+        val safListedPath = if (effective.isMediaStorePath()) listedPath else effective
 
         if (useCache) {
             val ram = BrowseSession.getLocalCachedListing(pathKey)
@@ -215,7 +227,7 @@ object LocalFolderListing {
                         sessionCurrent = cached.sessionCurrent,
                     )
                 }
-                val materialized = materializeLocalEntries(effective, filledRemote)
+                val materialized = materializeLocalEntries(safListedPath, filledRemote)
                 onCached?.invoke(materialized)
                 val shouldQuickScan =
                     Settings.networkFolderIndexQuickScan.value && !cached.sessionCurrent
@@ -223,7 +235,7 @@ object LocalFolderListing {
                 if (!isShallowIncompleteListing(filledRemote)) {
                     return@withContext try {
                         val refresh = listDirectorySlim(
-                            effective,
+                            safListedPath,
                             preferMediaStore,
                             filledRemote,
                             rootId,
@@ -252,7 +264,7 @@ object LocalFolderListing {
                             toKeep,
                             sessionCurrent = true,
                         )
-                        materializeLocalEntries(effective, toKeep)
+                        materializeLocalEntries(safListedPath, toKeep)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
@@ -286,7 +298,7 @@ object LocalFolderListing {
             if (previous != null) preferCompleteFolderGalleries(previous, shallow) else shallow
         // RAM-only until deep succeeds (avoid slim treating Empty shells as final).
         BrowseSession.putLocalListing(pathKey, shallowMerged, sessionCurrent = false)
-        val shallowMaterialized = materializeLocalEntries(effective, shallowMerged)
+        val shallowMaterialized = materializeLocalEntries(safListedPath, shallowMerged)
         logcat("FolderIndex") {
             "Local shallow list root=$rootId dir=$relativeDir " +
                 "children=${children.size} entries=${shallowMerged.size} " +
@@ -296,7 +308,7 @@ object LocalFolderListing {
 
         BrowseSession.getLocalCachedListing(pathKey)?.let { cached ->
             if (cached.sessionCurrent) {
-                return@withContext materializeLocalEntries(effective, cached.entries)
+                return@withContext materializeLocalEntries(safListedPath, cached.entries)
             }
         }
 
@@ -320,7 +332,7 @@ object LocalFolderListing {
                     "Local deep classify root=$rootId dir=$relativeDir " +
                         "entries=${stored.size} ms=${(System.nanoTime() - t1) / 1_000_000}"
                 }
-                materializeLocalEntries(effective, stored)
+                materializeLocalEntries(safListedPath, stored)
             }
         } catch (e: CancellationException) {
             throw e
@@ -626,11 +638,17 @@ object LocalFolderListing {
         dir: Path,
         preferMediaStore: Boolean,
     ): List<RemoteChild> {
-        val path = resolveBrowsePath(dir, preferMediaStore = preferMediaStore)
-        return BrowseSession.rememberLocalRawChildren(BrowseSession.pathKey(path)) {
+        // Do NOT replace the path with its `mediastore:/…` twin here. That rewrite sends
+        // [forEachBrowseChild] down the MediaStore-only branch, which knows nothing about
+        // archives, folders the media scanner never indexed, or non-media files — adding a
+        // SAF folder in the default (MediaStore) mode then listed "some images and videos"
+        // and nothing else. Keeping the SAF path lets [forEachSafChild] do what it was
+        // written for: emit MediaStore children first, then SAF for every name the index
+        // did not cover. Media-only roots are already `mediastore:` paths and skip this.
+        return BrowseSession.rememberLocalRawChildren(BrowseSession.pathKey(dir)) {
             // Raw list: `.nomedia` dirs are tagged after child peeks (same as SMB),
             // so we do not SAF-list every subdirectory twice.
-            path.listBrowseChildrenRaw().map { it.toRemoteChild() }
+            dir.listBrowseChildrenRaw().map { it.toRemoteChild() }
         }
     }
 

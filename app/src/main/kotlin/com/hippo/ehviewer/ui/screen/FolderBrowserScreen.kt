@@ -88,6 +88,7 @@ import com.hippo.ehviewer.library.MediaStoreFs
 import com.hippo.ehviewer.library.ReaderGalleryPlaylist
 import com.hippo.ehviewer.library.VideoThumbnail
 import com.hippo.ehviewer.library.VideoThumbnailSource
+import com.hippo.ehviewer.library.isMediaStorePath
 import com.hippo.ehviewer.library.ZipAsDirListing
 import com.hippo.ehviewer.library.ZipPaths
 import com.hippo.ehviewer.library.browseScrollLayoutKey
@@ -340,7 +341,13 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
             preferMediaStore = frame.preferMediaStore,
         )
         val cached = BrowseSession.getLocalCachedListing(BrowseSession.pathKey(effective)) ?: return false
-        entries = materializeLocalEntries(effective, cached.entries)
+        // Rows must address the real SAF tree: the cache is keyed by the MediaStore twin,
+        // but every path the UI hands back (enter dir / open file) has to be the SAF one
+        // the listing actually enumerated from.
+        entries = materializeLocalEntries(
+            if (effective.isMediaStorePath()) frame.path.toPath() else effective,
+            cached.entries,
+        )
         listedPath = frameListKey(frame)
         loading = false
         // Same as the zip branch: cached rows are visible, so the pending quick scan /

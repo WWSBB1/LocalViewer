@@ -83,6 +83,12 @@ fun tryMediaStoreTreeUriFromSaf(treeUri: Uri): String? {
  * Default is MediaStore-on. Per-source browse/scan passes the root's
  * [com.ehviewer.core.database.model.LibraryRootEntity.prefersMediaStore]
  * (false for media+archive mode on Manage Sources).
+ *
+ * **Do not use this for listing a directory's children.** Returning the
+ * `mediastore:/…` twin makes [forEachBrowseChild] take the MediaStore-only branch,
+ * which never reports archives, unindexed folders or non-media files. Callers that
+ * enumerate children must keep the SAF path so [forEachSafChild] can overlay the
+ * index and fall back to SAF for the remainder.
  */
 fun resolveBrowsePath(path: Path, preferMediaStore: Boolean = true): Path {
     if (path.isMediaStorePath()) return path

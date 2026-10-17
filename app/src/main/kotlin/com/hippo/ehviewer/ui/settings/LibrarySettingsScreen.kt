@@ -145,13 +145,15 @@ fun AnimatedVisibilityScope.LibrarySettingsScreen(navigator: DestinationsNavigat
         val role = pendingSafRole
         launchIO {
             runCatching {
-                context.contentResolver.takePersistableUriPermission(treeUri, URI_FLAGS)
-                val documentUri = DocumentsContract.buildDocumentUriUsingTree(
-                    treeUri,
-                    DocumentsContract.getTreeDocumentId(treeUri),
-                )
-                val path = documentUri.toOkioPath()
-                check(path.isDirectory) { "$path is not a directory" }
+                // Persistable permission is best-effort: some providers (vendor file
+                // managers, some SD-card roots) throw SecurityException even though the
+                // tree is usable for this session. [LocalLibrary.addRoot] retries it too.
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(treeUri, URI_FLAGS)
+                }.onFailure { logcat(it) }
+                // No `isDirectory` probe: OpenDocumentTree can only return a directory, and
+                // asking the provider (DocumentsContract query) failed outright on some
+                // devices — surfacing "Can't get location" for a perfectly good folder.
                 val name = context.displayNameForTreeUri(treeUri.toString())
                 when (LocalLibrary.addRoot(treeUri.toString(), name, role)) {
                     is AddRootResult.Created, is AddRootResult.UpgradedToLibrary -> Unit

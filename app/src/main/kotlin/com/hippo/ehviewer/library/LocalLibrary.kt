@@ -158,15 +158,22 @@ object LocalLibrary {
                 return@withIOContext AddRootResult.AlreadyExists(existing.id, existing.role)
             }
 
-            // New sources default to MediaStore (ACCESS_MODE = 0); user can opt into
-            // media+archive on Manage Sources for local archive scan/browse.
+            // SAF trees default to full file access: browse must behave like SMB / WebDAV,
+            // where a folder shows every child (subfolders, archives, non-media files).
+            // The old MediaStore default listed only what the system media scanner had
+            // indexed, so a freshly added folder looked empty or half-empty and its
+            // archives vanished. Pure device-media roots stay MediaStore below.
             val id = db.libraryRootDao().insert(
                 LibraryRootEntity(
                     treeUri = treeUri,
                     displayName = displayName,
                     addedAt = Clock.System.now().toEpochMilliseconds(),
                     role = role,
-                    accessMode = LIBRARY_ROOT_ACCESS_MEDIA,
+                    accessMode = if (media) {
+                        LIBRARY_ROOT_ACCESS_MEDIA
+                    } else {
+                        LIBRARY_ROOT_ACCESS_MEDIA_ARCHIVE
+                    },
                 ),
             )
             if (role == LIBRARY_ROOT_ROLE_LIBRARY) {
