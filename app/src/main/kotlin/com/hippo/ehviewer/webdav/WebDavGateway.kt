@@ -74,11 +74,23 @@ object WebDavGateway {
     /**
      * Rows of direct children an earlier (interrupted) pass already classified, keyed by
      * child name. Promoted/virtual rows are excluded — they are not direct children.
+     *
+     * Hidden rows are excluded too: `hidden` comes from a `.nomedia` probe or a previous
+     * mode filter, and once a row is known it was never re-peeked — so deleting the
+     * `.nomedia` (or turning Hidden files on later) left the folder invisible forever.
+     * Re-peeking a hidden child costs one PROPFIND and is the only way to notice that the
+     * reason it was hidden is gone.
      */
     private fun knownRowsOf(previous: List<BrowseEntryRemote>?): Map<String, BrowseEntryRemote.Directory> =
         previous.orEmpty().asSequence()
             .filterIsInstance<BrowseEntryRemote.Directory>()
-            .filter { it.presence != DirPresence.Pending && it.relativeName == it.name && !it.virtual }
+            .filter {
+                it.presence != DirPresence.Pending &&
+                    it.relativeName == it.name &&
+                    !it.virtual &&
+                    !it.hidden &&
+                    !it.unreachable
+            }
             .associateBy { it.name }
 
     /** Replace still-[DirPresence.Pending] rows with the ones [previous] already resolved. */
@@ -564,11 +576,26 @@ object WebDavGateway {
         } else {
             emptySet()
         }
+        // Re-peek hidden rows regardless of the Hidden-files setting. A cached row can be
+        // hidden because the folder used to contain `.nomedia`; once that marker is gone
+        // nothing else revisits it (slim skips it, the deep pass follows [knownRowsOf]),
+        // so the folder stayed invisible through every refresh.
+        val reappraiseHidden = cached.asSequence()
+            .filterIsInstance<BrowseEntryRemote.Directory>()
+            .filter {
+                it.hidden &&
+                    it.relativeName == it.name &&
+                    !it.virtual &&
+                    !isDotHiddenName(it.name) &&
+                    '/' !in it.relativeName.replace('\\', '/')
+            }
+            .mapNotNull { row -> children.firstOrNull { it.isDirectory && it.name == row.name } }
+            .toList()
         val deepHidden = if (com.hippo.ehviewer.Settings.browseShowHiddenFiles.value) {
-            hiddenDirectoriesNeedingDeepScan(cached, children)
+            hiddenDirectoriesNeedingDeepScan(cached, children) + reappraiseHidden
         } else {
-            emptyList()
-        }
+            reappraiseHidden
+        }.distinctBy { it.name }
         val deepNames = deepHidden.mapTo(HashSet()) { it.name }
         val cachedZipAsDir = if (zipFileNames.isEmpty()) {
             emptySet()
@@ -629,6 +656,8 @@ object WebDavGateway {
         // zero on every visit and never converges.
         val known = knownRowsOf(previous)
         // Dot folders: always tag-only (never peek). `.nomedia` dirs peek only when Hidden on.
+        // A cached row that was hidden is deliberately absent from [known], so it reaches
+        // this filter again and gets re-peeked — that is how a removed `.nomedia` heals.
         val dirsToPeek = children.filter { c ->
             c.isDirectory &&
                 !isProtectedSystemName(c.name) &&
