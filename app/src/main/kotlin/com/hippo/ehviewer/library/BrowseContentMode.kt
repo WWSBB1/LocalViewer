@@ -46,8 +46,13 @@ fun DirPresence.visibleIn(
 ): Boolean = when (mode) {
     // Leaf image folders already have a FolderGallery row; only retain real navigation
     // branches that may lead to gallery content. Pending = shallow stub (paint now).
+    // VideoOnly dirs stay visible: a video-only folder is still a real enterable
+    // directory the user navigated into before — hiding it here made the folder
+    // vanish from Galleries while History/favourites kept opening it fine.
     BrowseContentMode.Galleries ->
-        this == DirPresence.Pending || (this == DirPresence.Navigable && hasGallery)
+        this == DirPresence.Pending ||
+            (this == DirPresence.Navigable && hasGallery) ||
+            this == DirPresence.VideoOnly
     BrowseContentMode.Media -> when (this) {
         DirPresence.Pending -> true
         DirPresence.Navigable -> hasGallery || hasVideo
