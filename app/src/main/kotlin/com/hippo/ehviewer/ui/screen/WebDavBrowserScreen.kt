@@ -94,6 +94,7 @@ import com.hippo.ehviewer.library.filterRemoteSmallGalleries
 import com.hippo.ehviewer.library.isDocumentFileName
 import com.hippo.ehviewer.library.isHtmlFileName
 import com.hippo.ehviewer.library.isImageFileName
+import com.hippo.ehviewer.library.visibleIn
 import com.hippo.ehviewer.library.isPdfFileName
 import com.hippo.ehviewer.library.isSolidArchiveFileName
 import com.hippo.ehviewer.library.isStreamableArchiveFileName
@@ -327,6 +328,34 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                     .collapseRemoteFolderGalleryDirs(contentMode)
         }
         base.filterByBrowseSearch(search.keyword) { it.name }
+    }
+    // Which rows the filters above dropped, and why. "A folder exists server-side but is
+    // missing from the grid" has several independent causes (mode visibility, .nomedia
+    // hidden, stale unreachable flag, small-gallery threshold); without this the log only
+    // shows the pre-filter counts and the cause stays a guess.
+    val diagByKey = remember(displayEntries, filteredEntries, contentMode, showHiddenFiles) {
+        val kept = filteredEntries.toHashSet()
+        displayEntries.filterNot { it in kept }.map { dropped ->
+            val why = when {
+                dropped.hidden && !showHiddenFiles -> "hidden(.nomedia/dot)"
+                dropped is BrowseEntryRemote.Directory && dropped.unreachable -> "unreachable"
+                dropped is BrowseEntryRemote.Directory &&
+                    !dropped.presence.visibleIn(contentMode, dropped.hasGallery, dropped.hasVideo) -> "mode=${contentMode.name}"
+                dropped is BrowseEntryRemote.FolderGallery && !showSmallGalleries ->
+                    "smallGallery"
+                else -> "search/other"
+            }
+            "${dropped.name}=$why"
+        }
+    }
+    LaunchedEffect(diagByKey, contentMode, relativeDir) {
+        if (diagByKey.isNotEmpty()) {
+            com.hippo.ehviewer.library.ScanDiag.log(
+                "filter dir=$relativeDir mode=${contentMode.name} hidden=$showHiddenFiles " +
+                    "kept=${filteredEntries.size} dropped=${diagByKey.size} :: " +
+                    diagByKey.joinToString(","),
+            )
+        }
     }
 
     /**
