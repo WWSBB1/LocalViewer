@@ -41,6 +41,7 @@ import okio.Path
  *   races never leave a page spinning forever (manual refresh worked because it
  *   forced a clean onRequest).
  */
+
 suspend inline fun <T> useSmbFolderPageLoader(
     source: SmbSourceEntity,
     remoteDir: String,
@@ -187,6 +188,8 @@ suspend inline fun <T> useSmbFolderPageLoader(
                 private fun ensureDownload(
                     index: Int,
                     interactive: Boolean,
+                    /** Automatic retry already spent for this attempt chain. */
+                    retry: Int = 0,
                     onReady: (() -> Unit)? = null,
                 ) {
                     if (index !in 0 until size) return
@@ -275,7 +278,15 @@ suspend inline fun <T> useSmbFolderPageLoader(
                             if (downloadJobs.owns(index, coroutineContext[Job])) {
                                 val waiters = takeReadyWaiters(index)
                                 if (waiters.isNotEmpty() || needsInteractive) {
-                                    notifyPageFailed(index, e.message)
+                                    // Same intermittent-failure shape as WebDAV: one silent
+                                    // retry before the page is painted as an error.
+                                    if (retry < DOWNLOAD_AUTO_RETRIES && waiters.isNotEmpty()) {
+                                        waiters.forEach { addReadyWaiter(index, it) }
+                                        downloadJobs.release(index, coroutineContext[Job])
+                                        ensureDownload(index, interactive = true, retry = retry + 1)
+                                    } else {
+                                        notifyPageFailed(index, e.message)
+                                    }
                                 }
                             }
                         } finally {

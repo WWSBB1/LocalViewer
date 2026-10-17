@@ -36,6 +36,11 @@ import okio.Path
  * Convert-mode lib-HDR/avif: interactive + 1 prefetch (B1 depth 2).
  * Direct-Bitmap mode: same prefetch slots as non-lib (cache original only).
  */
+
+/** Automatic page-download retries before the page is painted as an error. */
+@PublishedApi
+internal const val DOWNLOAD_AUTO_RETRIES = 1
+
 suspend inline fun <T> useWebDavFolderPageLoader(
     source: WebDavSourceEntity,
     remoteDir: String,
@@ -153,6 +158,8 @@ suspend inline fun <T> useWebDavFolderPageLoader(
                 private fun ensureDownload(
                     index: Int,
                     interactive: Boolean,
+                    /** Automatic retry already spent for this attempt chain. */
+                    retry: Int = 0,
                     onReady: (() -> Unit)? = null,
                 ) {
                     if (index !in 0 until size) return
@@ -238,7 +245,16 @@ suspend inline fun <T> useWebDavFolderPageLoader(
                             if (downloadJobs.owns(index, coroutineContext[Job])) {
                                 val waiters = takeReadyWaiters(index)
                                 if (waiters.isNotEmpty()) {
-                                    notifyPageFailed(index, e.message)
+                                    // A transient HTTP/Range blip used to paint a permanent
+                                    // error even though the same page downloads fine on the
+                                    // second try. Re-run once before surfacing the failure.
+                                    if (retry < DOWNLOAD_AUTO_RETRIES) {
+                                        waiters.forEach { addReadyWaiter(index, it) }
+                                        downloadJobs.release(index, coroutineContext[Job])
+                                        ensureDownload(index, interactive = true, retry = retry + 1)
+                                    } else {
+                                        notifyPageFailed(index, e.message)
+                                    }
                                 }
                             }
                         } finally {
@@ -262,13 +278,16 @@ suspend inline fun <T> useWebDavFolderPageLoader(
                         ) {
                             WebDavArchiveByteSource(source, password, zipRel, pipeline = false)
                         } ?: error("Cannot extract ZIP member $member from $zipRel")
-                        if (isDecodedDemand(index)) ramPages[index] = bytes
+                        // Keep the bytes we just downloaded: gating this on the *current*
+                        // demand set could drop a page that a navigation update raced with,
+                        // and the caller then reported "download incomplete" although the
+                        // fetch had succeeded. Dropping later is cheap (releaseRamPage).
+                        ramPages[index] = bytes
                         return
                     }
                     val sink = RamByteSink()
                     WebDavClient.downloadFile(source, password, remote, sink)
-                    val bytes = sink.take()
-                    if (isDecodedDemand(index)) ramPages[index] = bytes
+                    ramPages[index] = sink.take()
                 }
             },
         )

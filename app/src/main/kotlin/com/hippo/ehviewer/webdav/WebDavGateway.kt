@@ -24,6 +24,7 @@ import com.hippo.ehviewer.library.hasUnpeekedDirectories
 import com.hippo.ehviewer.library.hiddenDirectoriesNeedingDeepScan
 import com.hippo.ehviewer.library.isDotHiddenName
 import com.hippo.ehviewer.library.isPromotableLeafDirName
+import com.hippo.ehviewer.library.isPartiallyTruncatedSlimListing
 import com.hippo.ehviewer.library.isProtectedSystemName
 import com.hippo.ehviewer.library.isShallowIncompleteListing
 import com.hippo.ehviewer.library.isUntrustedSlimLiveListing
@@ -108,6 +109,13 @@ object WebDavGateway {
 
     /** Backoff between attempts (× attempt number). */
     private const val PEEK_RETRY_DELAY_MS = 400L
+
+    /**
+     * Reader page-name lookup (History / sibling open with no folder index). A transient
+     * transport blip must not turn into an empty page list → reader error.
+     */
+    private const val LIST_IMAGE_ATTEMPTS = 3
+    private const val LIST_IMAGE_RETRY_DELAY_MS = 350L
 
     /**
      * List one directory, retrying transient failures.
@@ -986,17 +994,45 @@ object WebDavGateway {
         FolderGalleryIndex.loadWebDav(source.id, sourceConfigKey(source), relativeDir)?.let { return it }
         if (Settings.browseZipAsDir.value) {
             ZipAsDirListing.splitZipBrowsePath(relativeDir)?.let { (zipRel, inner) ->
-                return withIOContext {
-                    runCatching {
-                        WebDavArchiveByteSource(source, password, zipRel, pipeline = false).use { src ->
-                            val cd = ZipCentralDirectory.open(src) ?: return@use emptyList()
-                            ZipAsDirListing.directImageNames(cd, inner)
-                        }
-                    }.getOrDefault(emptyList())
+                // Retry the EOCD/CD read. Returning an empty list here became a
+                // full-screen "ZIP folder has no images" on a transient Range failure,
+                // which is the intermittent error when opening the next gallery.
+                var last: Throwable? = null
+                repeat(LIST_IMAGE_ATTEMPTS) { attempt ->
+                    val names = withIOContext {
+                        runCatching {
+                            WebDavArchiveByteSource(source, password, zipRel, pipeline = false).use { src ->
+                                val cd = ZipCentralDirectory.open(src) ?: return@use emptyList()
+                                ZipAsDirListing.directImageNames(cd, inner)
+                            }
+                        }.onFailure { if (it is CancellationException) throw it; last = it }.getOrNull()
+                    }
+                    if (names != null) return names
+                    if (attempt < LIST_IMAGE_ATTEMPTS - 1) {
+                        delay(LIST_IMAGE_RETRY_DELAY_MS * (attempt + 1))
+                    }
+                }
+                throw last ?: IllegalStateException("Cannot read ZIP listing $zipRel")
+            }
+        }
+        // Opening a gallery from History / double-tap sibling navigation lands here when
+        // the folder index has no complete name list. A single transient PROPFIND failure
+        // used to surface as "No images in WebDAV folder" even though the directory was
+        // full of images, which is exactly the intermittent reader-open error.
+        var last: Throwable? = null
+        repeat(LIST_IMAGE_ATTEMPTS) { attempt ->
+            try {
+                return WebDavClient.listImageFileNames(source, password, relativeDir)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                last = e
+                if (attempt < LIST_IMAGE_ATTEMPTS - 1) {
+                    delay(LIST_IMAGE_RETRY_DELAY_MS * (attempt + 1))
                 }
             }
         }
-        return WebDavClient.listImageFileNames(source, password, relativeDir)
+        throw last ?: IllegalStateException("Cannot list WebDAV images in $relativeDir")
     }
 
     /**

@@ -854,7 +854,10 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
             launch {
                 try {
                     val sibling = withIOContext {
-                        runCatching { GallerySiblingNavigator.sibling(args, next) }.getOrNull()
+                        runCatching { GallerySiblingNavigator.sibling(args, next) }
+                            .onFailure { com.ehviewer.core.util.logcat("SiblingNav", it) }
+                            .onSuccess { if (it == null) com.ehviewer.core.util.logcat("SiblingNav") { "no sibling next=$next args=$args" } }
+                            .getOrNull()
                     } ?: return@launch
                     // Progress FK for sibling gallery + bump History (library gallery or browse path).
                     sibling.let { s ->

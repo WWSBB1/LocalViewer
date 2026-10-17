@@ -142,6 +142,14 @@ suspend inline fun <T> useZipFolderPageLoader(
 @PublishedApi
 internal fun zipFolderMember(prefix: String, fileName: String): String = if (prefix.isEmpty()) fileName else "$prefix/$fileName"
 
+/** Fresh-transport retries when the central directory cannot be read (sibling nav blip). */
+private const val CD_OPEN_ATTEMPTS = 3
+private const val CD_OPEN_RETRY_DELAY_MS = 250L
+
+/** Fresh-transport retries for one member read before the page is painted as an error. */
+private const val MEMBER_READ_ATTEMPTS = 3
+private const val MEMBER_READ_RETRY_DELAY_MS = 200L
+
 @PublishedApi
 internal fun zipFolderPageCached(zipKey: String, prefix: String, fileName: String): Boolean {
     val dest = ZipMemberCover.destFile(zipKey, zipFolderMember(prefix, fileName))
@@ -165,22 +173,38 @@ internal class ZipFolderExtractSession(
             if (closed) return null
             directory?.let { return it }
         }
-        val src = synchronized(lock) {
+        // Sibling navigation opens the next gallery while the previous one is still
+        // winding down, and the first Range reads can land on a connection the server
+        // just dropped. One failed EOCD/CD parse used to surface as a full-screen
+        // "Cannot read ZIP" even though the archive was perfectly reachable.
+        repeat(CD_OPEN_ATTEMPTS) { attempt ->
+            val src = synchronized(lock) {
+                if (closed) return null
+                directory?.let { return it }
+                source ?: runCatching { openSource() }.getOrNull()?.also { source = it }
+            } ?: return null
+            val opened = ZipCentralDirectory.open(src)
             if (closed) return null
-            directory?.let { return it }
-            source ?: runCatching { openSource() }.getOrNull()?.also { source = it }
-        } ?: return null
-        val opened = ZipCentralDirectory.open(src)
-        synchronized(lock) {
-            if (closed) return null
-            if (opened == null) {
-                source = null
-                runCatching { src.close() }
-                return null
+            if (opened != null) {
+                synchronized(lock) {
+                    if (closed) return null
+                    directory = opened
+                }
+                return opened
             }
-            directory = opened
-            return opened
+            // Drop the failed transport so the retry opens a fresh one. Guard against a
+            // concurrent attempt having already installed a newer source.
+            synchronized(lock) {
+                if (source === src) source = null
+                directory?.let { installed ->
+                    // Another thread finished the CD while this attempt failed — use it.
+                    return installed
+                }
+            }
+            runCatching { src.close() }
+            if (attempt < CD_OPEN_ATTEMPTS - 1) Thread.sleep(CD_OPEN_RETRY_DELAY_MS * (attempt + 1))
         }
+        return null
     }
 
     fun ensurePage(
@@ -192,16 +216,27 @@ internal class ZipFolderExtractSession(
         val member = zipFolderMember(prefix, imageNames[index])
         val dest = ZipMemberCover.destFile(zipKey, member)
         if (dest.isFile && dest.length() > 0L) return dest.absolutePath.toPath()
-        val cd = cd() ?: error("Cannot read ZIP: $zipKey")
-        val entry = cd.find(member) ?: error("Missing ZIP member: $member")
-        if (ZipMemberCover.rejectIfTooLarge(entry, notify = true)) {
-            error("ZIP member too large")
+        val entry = findEntry(zipKey, member)
+        // A member read can hit a connection the server just recycled (next-gallery
+        // open, screen resume). Retry on a fresh transport before surfacing an error.
+        var last: Throwable? = null
+        repeat(MEMBER_READ_ATTEMPTS) { attempt ->
+            try {
+                val cd = cd() ?: error("Cannot read ZIP: $zipKey")
+                check(cd.extractToFile(entry, dest, maxBytes = ZipMemberCover.MAX_CACHE_BYTES)) {
+                    "Extract failed: $member"
+                }
+                OriginDiskCache.scheduleTrim()
+                return dest.absolutePath.toPath()
+            } catch (e: Throwable) {
+                last = e
+                if (attempt < MEMBER_READ_ATTEMPTS - 1) {
+                    dropSource()
+                    Thread.sleep(MEMBER_READ_RETRY_DELAY_MS * (attempt + 1))
+                }
+            }
         }
-        check(cd.extractToFile(entry, dest, maxBytes = ZipMemberCover.MAX_CACHE_BYTES)) {
-            "Extract failed: $member"
-        }
-        OriginDiskCache.scheduleTrim()
-        return dest.absolutePath.toPath()
+        throw last ?: IllegalStateException("Extract failed: $member")
     }
 
     fun pageBytes(
@@ -213,13 +248,44 @@ internal class ZipFolderExtractSession(
         val member = zipFolderMember(prefix, imageNames[index])
         val dest = ZipMemberCover.destFile(zipKey, member)
         if (dest.isFile && dest.length() > 0L) return dest.readBytes()
+        val entry = findEntry(zipKey, member)
+        var last: Throwable? = null
+        repeat(MEMBER_READ_ATTEMPTS) { attempt ->
+            try {
+                val cd = cd() ?: error("Cannot read ZIP: $zipKey")
+                return cd.extract(entry, maxBytes = ZipMemberCover.MAX_CACHE_BYTES)
+                    ?: error("Extract failed: $member")
+            } catch (e: Throwable) {
+                last = e
+                if (attempt < MEMBER_READ_ATTEMPTS - 1) {
+                    dropSource()
+                    Thread.sleep(MEMBER_READ_RETRY_DELAY_MS * (attempt + 1))
+                }
+            }
+        }
+        throw last ?: IllegalStateException("Extract failed: $member")
+    }
+
+    /**
+     * Resolve [member] once, up front. A missing member / oversized member is permanent,
+     * so it must fail immediately instead of burning transport retries on it.
+     */
+    private fun findEntry(zipKey: String, member: String): ZipCentralDirectory.Entry {
         val cd = cd() ?: error("Cannot read ZIP: $zipKey")
         val entry = cd.find(member) ?: error("Missing ZIP member: $member")
         if (ZipMemberCover.rejectIfTooLarge(entry, notify = true)) {
             error("ZIP member too large")
         }
-        return cd.extract(entry, maxBytes = ZipMemberCover.MAX_CACHE_BYTES)
-            ?: error("Extract failed: $member")
+        return entry
+    }
+
+    /** Forget the CD + transport so the next attempt re-opens from scratch. */
+    private fun dropSource() {
+        val src = synchronized(lock) {
+            directory = null
+            source.also { source = null }
+        }
+        if (src != null) runCatching { src.close() }
     }
 
     override fun close() {
