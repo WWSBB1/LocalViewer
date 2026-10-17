@@ -275,15 +275,30 @@ static la_ssize_t stream_read_cb(struct archive *a, void *client_data, const voi
 /** Absolute pread for ZIP CD indexing / direct extract (counts toward stream_bytes_read). */
 static int stream_pread(uint8_t *dst, la_int64_t off, size_t len) {
     if (!dst || len == 0) return 0;
-    if (archive_should_abort()) return -1;
-    if (off < 0 || (size_t) off > archiveSize) return -1;
+    if (archive_should_abort()) {
+        LOGE("stream_pread: aborted off=%lld len=%zu", (long long) off, len);
+        return -1;
+    }
+    if (off < 0 || (size_t) off > archiveSize) {
+        LOGE("stream_pread: out of range off=%lld size=%zu", (long long) off, archiveSize);
+        return -1;
+    }
     size_t max = archiveSize - (size_t) off;
     if (len > max) len = max;
-    if (stream_scan_exhausted()) return -1;
+    if (stream_scan_exhausted()) {
+        LOGE("stream_pread: scan exhausted off=%lld", (long long) off);
+        return -1;
+    }
     JNIEnv *env = archive_get_env();
-    if (!env || !g_stream_bridge || !g_mid_read || !g_mid_seek) return -1;
+    if (!env || !g_stream_bridge || !g_mid_read || !g_mid_seek) {
+        LOGE("stream_pread: bridge missing off=%lld", (long long) off);
+        return -1;
+    }
     g_stream_pos = off;
-    if (stream_sync_java_pos(env, off) != 0) return -1;
+    if (stream_sync_java_pos(env, off) != 0) {
+        LOGE("stream_pread: seek failed off=%lld", (long long) off);
+        return -1;
+    }
     size_t got = 0;
     while (got < len) {
         if (archive_should_abort()) return -1;
@@ -582,11 +597,25 @@ static jint zip_stream_open_from_cd(jboolean sort_entries, bool cover_only) {
 
 /** Inflate (method 8) or store (method 0) one ZIP member using CD sizes. */
 static int zip_stream_extract_entry(entry *e, void *out, size_t out_cap) {
-    if (!e || !out || e->size <= 0 || (size_t) e->size > out_cap) return -1;
-    if (e->local_header_offset < 0) return -1;
+    if (!e || !out || e->size <= 0 || (size_t) e->size > out_cap) {
+        LOGE("zip extract: bad args size=%zd cap=%zu", e ? e->size : -1, out_cap);
+        return -1;
+    }
+    if (e->local_header_offset < 0) {
+        LOGE("zip extract: no local header offset for %s", e->filename ? e->filename : "?");
+        return -1;
+    }
 
     uint8_t lh[30];
-    if (stream_pread(lh, e->local_header_offset, 30) != 30) return -1;
+    if (stream_pread(lh, e->local_header_offset, 30) != 30) {
+        // stream_pread is silent for abort / closed bridge / EOF — the caller only sees
+        // "Extract incomplete", which gives no way to tell a network blip from a stale
+        // session.
+        LOGE("zip extract: local header read failed off=%lld abort=%d closed=%d",
+             (long long) e->local_header_offset, archive_should_abort(),
+             g_stream_bridge == NULL);
+        return -1;
+    }
     if (lh[0] != 'P' || lh[1] != 'K' || lh[2] != 3 || lh[3] != 4) {
         LOGE("%s", "ZIP local header signature mismatch");
         return -1;

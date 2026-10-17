@@ -583,7 +583,17 @@ suspend inline fun <T> useStreamArchivePageLoader(
                             val ext = getExtension(index).ifBlank { return@withLock null }
                             val buffer = bridge.checkedNative {
                                 extractToByteBuffer(index)
-                            } ?: return@withLock null
+                            }
+                            if (buffer == null) {
+                                // Native returns null for every failure mode (aborted
+                                // session, bridge closed, bad member offsets, inflate
+                                // mismatch). Surface it instead of silently turning into
+                                // "Extract incomplete", which gave no way to tell them apart.
+                                logcat("StreamArchive") {
+                                    "extract null index=$index ext=$ext cacheKey=$cacheKey"
+                                }
+                                return@withLock null
+                            }
                             try {
                                 // Reader exit may cancel while native extract was finishing —
                                 // do not publish a buffer we no longer own the session for.
