@@ -1002,11 +1002,13 @@ object WebDavClient {
             }
             val parent = relativeDir.replace('\\', '/').trim('/')
             val expectedPrefix = if (parent.isEmpty()) "" else "$parent/"
-            if (parent.isNotEmpty() && !childRel.startsWith(expectedPrefix)) {
+            // Case-insensitive: IIS / some NAS return `/Dav/…` for a source configured as
+            // `/dav/`. A case mismatch used to drop every child of the requested folder.
+            if (parent.isNotEmpty() && !childRel.startsWith(expectedPrefix, ignoreCase = true)) {
                 resetResponse()
                 return
             }
-            val remainder = if (parent.isEmpty()) childRel else childRel.removePrefix(expectedPrefix)
+            val remainder = if (parent.isEmpty()) childRel else childRel.substring(expectedPrefix.length)
             if (remainder.isEmpty() || remainder.contains('/')) {
                 // Self or nested deeper than depth-1 noise.
                 resetResponse()
@@ -1127,19 +1129,23 @@ object WebDavClient {
     private fun escapeStrayPercents(href: String): String = STRAY_PERCENT.replace(href, "%25")
 
     private fun sameCollection(a: Url, b: Url): Boolean {
+        // Paths are compared case-insensitively: servers may echo a different casing
+        // than the configured prefix (IIS `$` share names, NAS volume labels).
         fun norm(u: Url) = u.host.lowercase() + u.encodedPath.trimEnd('/').lowercase()
         return norm(a) == norm(b)
     }
 
     private fun relativeFromRoot(root: Url, abs: Url): String? {
-        if (!abs.host.equals(root.host, ignoreCase = true)) return null
         val rootPath = root.encodedPath.trimEnd('/')
         val absPath = abs.encodedPath.trimEnd('/')
-        if (absPath == rootPath) return ""
-        if (!absPath.startsWith(rootPath)) {
+        if (absPath.equals(rootPath, ignoreCase = true)) return ""
+        // Path prefix, not host: a server that answers with its canonical hostname /
+        // IP while the source was configured with the other one still lists the same
+        // collection. Dropping on host mismatch hid the whole folder.
+        if (!absPath.startsWith(rootPath, ignoreCase = true)) {
             return absPath.trimStart('/').let { decodeHref(it) }
         }
-        return absPath.removePrefix(rootPath).trimStart('/').let { decodeHref(it) }
+        return absPath.substring(rootPath.length).trimStart('/').let { decodeHref(it) }
     }
 }
 

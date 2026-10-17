@@ -470,6 +470,40 @@ fun isUntrustedSlimLiveListing(
 }
 
 /**
+ * A slim live listing that lost **part** of the cached child folders.
+ *
+ * [isUntrustedSlimLiveListing] only rejects the total-wipe case. A PROPFIND whose XML was
+ * truncated (server aborted the body, proxy limit, timed-out worker) still returns some
+ * children, so every folder after the cut-off used to be marked unreachable and stayed
+ * hidden until the user happened to re-enter that exact directory. Treat any large
+ * relative loss as "listing incomplete": keep the cached rows, mark nothing.
+ */
+fun isPartiallyTruncatedSlimListing(
+    cachedEntries: List<BrowseEntryRemote>,
+    liveChildren: List<RemoteChild>,
+): Boolean {
+    val cachedDirs = cachedDirectDirectoryNames(cachedEntries)
+    if (cachedDirs.isEmpty()) return false
+    val liveDirectories = liveChildren.asSequence()
+        .filter { it.isDirectory && !isProtectedSystemName(it.name) }
+        .map { it.name }
+        .toSet()
+    if (liveDirectories.isEmpty()) return false
+    // Zip-as-dir fake folders live as files in the live list.
+    val liveZipNames = liveChildren.asSequence()
+        .filter { !it.isDirectory && isZipArchiveFileName(it.name) }
+        .map { it.name }
+        .toSet()
+    val recoverable = cachedDirs.count { it in liveDirectories || it in liveZipNames }
+    val missing = cachedDirs.size - recoverable
+    // Nothing actually went away.
+    if (missing <= 0) return false
+    // One or two concurrent renames are normal churn; a big share missing at once is a
+    // truncated/untrusted listing, not a user deleting half the layer.
+    return missing >= 3 && missing * 2 >= cachedDirs.size
+}
+
+/**
  * Disk-save last line of defence: a poorer re-list must not replace a complete folder
  * index (Empty/Pending shells, or a listing that dropped every child folder).
  */

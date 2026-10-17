@@ -90,7 +90,16 @@ object WebDavGateway {
     } else {
         rows.map { row ->
             if (row is BrowseEntryRemote.Directory && row.presence == DirPresence.Pending) {
-                known[row.name] ?: row
+                (known[row.name] ?: row).let { carried ->
+                    // The child is in the live listing right now, so a stale `unreachable`
+                    // flag (set by an earlier truncated/failed slim pass) must not survive.
+                    // Keeping it hid perfectly reachable folders from every later visit.
+                    if (carried is BrowseEntryRemote.Directory && carried.unreachable) {
+                        carried.copy(unreachable = false)
+                    } else {
+                        carried
+                    }
+                }
             } else {
                 row
             }
@@ -544,7 +553,9 @@ object WebDavGateway {
         configKey: String,
     ): SlimDirectoryRefresh {
         val children = listChildrenForRelativeDir(source, password, relativeDir)
-        if (isUntrustedSlimLiveListing(cached, children)) {
+        if (isUntrustedSlimLiveListing(cached, children) ||
+            isPartiallyTruncatedSlimListing(cached, children)
+        ) {
             return SlimDirectoryRefresh(cached, emptySet(), persist = false)
         }
         val plan = planRemoteDirectorySlimRefresh(cached, children)
