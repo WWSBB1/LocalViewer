@@ -90,6 +90,15 @@ import com.ramcosta.composedestinations.navigation.DestinationsNavigator
 import kotlin.time.Clock
 import moe.tarsin.snackbar
 import moe.tarsin.string
+import android.os.Build
+import android.os.Environment
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.hippo.ehviewer.library.AllFilesAccess
+import com.hippo.ehviewer.ui.tools.awaitConfirmationOrCancel
+import java.io.File
 
 private const val URI_FLAGS = FLAG_GRANT_READ_URI_PERMISSION or FLAG_GRANT_WRITE_URI_PERMISSION
 
@@ -117,6 +126,60 @@ fun AnimatedVisibilityScope.LibrarySettingsScreen(navigator: DestinationsNavigat
     var accessChooserRole by remember { mutableStateOf<Int?>(null) }
     var mediaDenied by remember { mutableStateOf(false) }
     var openSafAfterMediaPerm by remember { mutableStateOf(false) }
+
+    /** Role + path waiting for the user to grant "All files access" and come back. */
+    var pendingAllFilesAdd by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    val downloadsAdded = stringResource(R.string.library_add_download_folder_added)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            val pending = pendingAllFilesAdd ?: return@LifecycleEventObserver
+            // Returned from the system settings page; only continue if it was granted.
+            if (!AllFilesAccess.isGranted(context)) return@LifecycleEventObserver
+            pendingAllFilesAdd = null
+            val (role, path) = pending
+            launchIO {
+                when (LocalLibrary.addRoot(path, File(path).name, role)) {
+                    is AddRootResult.Created, is AddRootResult.UpgradedToLibrary ->
+                        launch { snackbar(downloadsAdded) }
+                    is AddRootResult.AlreadyExists -> launch { snackbar(alreadyAdded) }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    /**
+     * Add a plain filesystem folder (Download / storage root) that the SAF picker refuses
+     * to grant on Android 11+. Requires "All files access"; when it is missing the user is
+     * sent to the system page first and the add re-runs when they come back.
+     */
+    fun addAllFilesFolder(role: Int) {
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if (!AllFilesAccess.isGranted(context)) {
+            pendingAllFilesAdd = role to dir.path
+            launch {
+                awaitConfirmationOrCancel(
+                    title = R.string.library_all_files_access_title,
+                    confirmText = R.string.library_all_files_access_open_settings,
+                ) {
+                    Text(stringResource(R.string.library_all_files_access_message))
+                }
+                AllFilesAccess.request(context)
+            }
+            return
+        }
+        launchIO {
+            // Same path shape rootPath() understands for all-files roots.
+            when (LocalLibrary.addRoot(dir.path, dir.name, role)) {
+                is AddRootResult.Created, is AddRootResult.UpgradedToLibrary ->
+                    launch { snackbar(downloadsAdded) }
+                is AddRootResult.AlreadyExists -> launch { snackbar(alreadyAdded) }
+            }
+        }
+    }
 
     /** After media permission grant, switch this SAF root to MediaStore mode. */
     var pendingMediaModeRootId by remember { mutableLongStateOf(-1L) }
@@ -345,6 +408,16 @@ fun AnimatedVisibilityScope.LibrarySettingsScreen(navigator: DestinationsNavigat
                     title = stringResource(R.string.library_add_folder_source),
                     onClick = { launchAddLocalSource(LIBRARY_ROOT_ROLE_FOLDER) },
                 )
+            }
+            // SAF cannot grant Download / the storage root on Android 11+. This row is the
+            // escape hatch: grant "All files access" and add those folders directly.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                item(key = "add-download-folder") {
+                    AddSourceRow(
+                        title = stringResource(R.string.library_add_download_folder),
+                        onClick = { addAllFilesFolder(LIBRARY_ROOT_ROLE_FOLDER) },
+                    )
+                }
             }
 
             item(key = "hdr-smb") {

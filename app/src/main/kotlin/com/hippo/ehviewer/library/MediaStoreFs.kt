@@ -2,11 +2,14 @@ package com.hippo.ehviewer.library
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.ehviewer.core.files.mediaStoreParentRelativeDir
 import com.ehviewer.core.files.toUri
@@ -204,6 +207,54 @@ object MediaPermissions {
     fun shouldRequestMediaPermissionForSafAdd(context: Context = appCtx): Boolean = !hasCompleteMediaAccess(context)
 
     private fun isGranted(context: Context, permission: String): Boolean = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+}
+
+/**
+ * "All files access" (Android 11+, `MANAGE_EXTERNAL_STORAGE`).
+ *
+ * SAF (`OpenDocumentTree`) refuses to grant the storage root and Download — the system
+ * picker shows "for your privacy, choose another folder". Those are exactly the folders
+ * people download comics into, and this permission is the only supported way to read them
+ * without root. Granted by the user on a dedicated system settings page, not a runtime
+ * dialog; on Android 10 and below the legacy storage permission already covers it.
+ *
+ * Only used to decide whether to offer the plain-file fallback; every browse path still
+ * works through SAF when the permission is absent.
+ */
+object AllFilesAccess {
+    fun isGranted(context: Context = appCtx): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return isGrantedLegacy(context)
+        }
+        return Environment.isExternalStorageManager()
+    }
+
+    /** Open the system page where the user grants "All files access" for this app. */
+    fun request(context: Context): Boolean = runCatching {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+        }
+        context.startActivity(intent)
+        true
+    }.getOrElse {
+        // Some OEM ROMs hide the per-app page; fall back to the global list.
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun isGrantedLegacy(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+        ) == PackageManager.PERMISSION_GRANTED
 }
 
 /**

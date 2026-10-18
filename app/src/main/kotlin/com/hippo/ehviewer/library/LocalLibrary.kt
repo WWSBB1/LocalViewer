@@ -137,7 +137,9 @@ object LocalLibrary {
         withIOContext {
             val ctx = appCtx
             val media = isMediaStoreRootUri(treeUri)
-            if (!media) {
+            // Plain paths (all-files-access roots) have no tree permission to persist.
+            val plainPath = treeUri.startsWith('/')
+            if (!media && !plainPath) {
                 runCatching {
                     ctx.contentResolver.takePersistableUriPermission(treeUri.toUri(), URI_FLAGS)
                 }.onFailure { logcat(it) }
@@ -466,6 +468,13 @@ object LocalLibrary {
     fun rootPath(root: LibraryRootEntity): Path? {
         if (isMediaStoreRootUri(root.treeUri)) {
             return mediaStoreTreeUriToPath(root.treeUri)
+        }
+        // All-files-access roots store a plain filesystem path (`/storage/emulated/0/Download`).
+        // Android 11+ SAF refuses to grant Download / the storage root, so this is the only
+        // way to browse them; [BrowseFs.forEachBrowseChild] already handles `/…` paths via
+        // File.listFiles.
+        if (root.treeUri.startsWith('/')) {
+            return root.treeUri.toPath()
         }
         val safPath = runCatching {
             val treeUri = root.treeUri.toUri()

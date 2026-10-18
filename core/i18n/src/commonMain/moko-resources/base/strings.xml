@@ -27,6 +27,12 @@
     <string name="library_add_root">Add library folder</string>
     <string name="library_add_library_source">Add Library Source</string>
     <string name="library_add_folder_source">Add Folder Source</string>
+    <string name="library_add_download_folder">Add “Download” folder (needs access)</string>
+    <string name="library_all_files_access_title">All files access required</string>
+    <string name="library_all_files_access_message">The system folder picker refuses to grant “Download” and the storage root (“for your privacy, choose another folder”). Adding those directories requires enabling “All files access” for this app in system settings. Open settings now?</string>
+    <string name="library_all_files_access_open_settings">Open settings</string>
+    <string name="library_all_files_access_denied">Without “All files access” this folder cannot be read</string>
+    <string name="library_add_download_folder_added">“Download” folder added</string>
     <string name="library_root_already_added">This folder is already added</string>
     <string name="source_access_saf">Folder picker (SAF)</string>
     <string name="source_access_saf_summary">Pick any folder (including archives).</string>

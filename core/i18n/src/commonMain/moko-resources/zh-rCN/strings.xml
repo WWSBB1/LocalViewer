@@ -482,6 +482,12 @@
     <string name="library_add_library_source">添加图库源</string>
     <string name="library_add_folder_source">添加浏览文件夹</string>
     <string name="library_root_already_added">该文件夹已添加</string>
+    <string name="library_add_download_folder">添加“下载”文件夹（需授权）</string>
+    <string name="library_all_files_access_title">需要“所有文件访问权限”</string>
+    <string name="library_all_files_access_message">系统的文件夹选择器拒绝授权“下载”和存储根目录（会提示“为了你的隐私安全，请使用其他文件夹”）。要添加这些目录，需要在系统设置里为本应用开启“所有文件访问权限”。是否现在前往设置？</string>
+    <string name="library_all_files_access_open_settings">前往设置</string>
+    <string name="library_all_files_access_denied">未获得“所有文件访问权限”，无法读取该文件夹</string>
+    <string name="library_add_download_folder_added">已添加“下载”文件夹</string>
     <string name="folder_no_browse_roots">暂无仅浏览文件夹</string>
     <!-- Filter -->
     <string name="filter">屏蔽列表</string>

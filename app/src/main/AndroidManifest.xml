@@ -33,6 +33,16 @@
         tools:ignore="PhotoAndVideoPolicy" />
 
     <!--
+      "Add folder" must be able to pick the real Download folder. Android 11+ SAF
+      (DocumentsUI) refuses to grant Download / the storage root even though the app can
+      read them with this permission, which is the only supported way round it.
+      Requested from Manage Sources → Add folder; never assumed at startup.
+    -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <!--
       Package visibility (API 30+): without this, queryIntentActivities for video
       players returns empty → Settings “Default video player” shows no apps.
       Matching VIEW intents are still visible for createChooser; listing needs <queries>.
