@@ -123,23 +123,32 @@ fun Path.listBrowseChildrenRaw(
 
 @PublishedApi
 internal inline fun Path.forEachPhysicalChild(visitor: (BrowseChild) -> Boolean) {
-    val file = File(toString())
-    val files = file.listFiles() ?: return
-    for (child in files) {
-        val name = child.name
+    for (child in physicalChildren(this)) {
+        if (!visitor(child)) return
+    }
+}
+
+/**
+ * Children of a plain filesystem directory (all-files-access roots such as Download).
+ *
+ * Split out from the inline iterator so the "everything is listed" property — folders,
+ * archives, images, videos, non-media files — is testable on the JVM. That property is
+ * exactly what was broken when such roots were resolved to `mediastore:` paths.
+ */
+@PublishedApi
+internal fun physicalChildren(dir: Path): List<BrowseChild> {
+    val files = File(dir.toString()).listFiles() ?: return emptyList()
+    return files.map { child ->
         val isDir = child.isDirectory
-        val cont = visitor(
-            BrowseChild(
-                name = name,
-                isDirectory = isDir,
-                path = this / name,
-                size = if (isDir) 0L else child.length().coerceAtLeast(0L),
-                lastModifiedMs = child.lastModified().coerceAtLeast(0L),
-                hidden = child.isHidden || isDotHiddenName(name),
-                readOnly = !child.canWrite(),
-            ),
+        BrowseChild(
+            name = child.name,
+            isDirectory = isDir,
+            path = dir / child.name,
+            size = if (isDir) 0L else child.length().coerceAtLeast(0L),
+            lastModifiedMs = child.lastModified().coerceAtLeast(0L),
+            hidden = child.isHidden || isDotHiddenName(child.name),
+            readOnly = !child.canWrite(),
         )
-        if (!cont) return
     }
 }
 
