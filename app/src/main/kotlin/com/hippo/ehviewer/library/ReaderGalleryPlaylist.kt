@@ -6,6 +6,8 @@ import com.ehviewer.core.model.BaseGalleryInfo
 import com.ehviewer.core.model.GalleryInfo.Companion.NOT_FAVORITED
 import com.hippo.ehviewer.Settings
 import com.hippo.ehviewer.ui.reader.ReaderScreenArgs
+import com.hippo.ehviewer.ui.screen.BrowseSortMode
+import com.hippo.ehviewer.ui.screen.sortedForBrowseFolderUi
 
 /**
  * Ordered gallery list for double-tap prev/next in the reader.
@@ -95,7 +97,7 @@ object ReaderGalleryPlaylist {
         parentRelative: String,
         entries: List<BrowseEntry>,
     ) {
-        items = entries.mapNotNull { e ->
+        items = sortedGalleryRows(entries).mapNotNull { e ->
             when (e) {
                 is BrowseEntry.FolderGallery -> {
                     zipAsDirPlaylistItem(rootId, parentRelative, e)
@@ -146,7 +148,7 @@ object ReaderGalleryPlaylist {
         parentRelative: String,
         entries: List<BrowseEntryRemote>,
     ) {
-        items = entries.mapNotNull { e ->
+        items = sortedRemoteGalleryRows(entries).mapNotNull { e ->
             when (e) {
                 is BrowseEntryRemote.FolderGallery -> {
                     val remote = if (e.relativeName.isEmpty()) {
@@ -216,7 +218,7 @@ object ReaderGalleryPlaylist {
         parentRelative: String,
         entries: List<BrowseEntryRemote>,
     ) {
-        items = entries.mapNotNull { e ->
+        items = sortedRemoteGalleryRows(entries).mapNotNull { e ->
             when (e) {
                 is BrowseEntryRemote.FolderGallery -> {
                     val remote = if (e.relativeName.isEmpty()) {
@@ -321,6 +323,53 @@ object ReaderGalleryPlaylist {
         is Item.SmbStreamArchive -> ReaderScreenArgs.SmbStreamArchive(sourceId, remotePath, page = -1, info = info)
         is Item.WebDavStreamArchive -> ReaderScreenArgs.WebDavStreamArchive(sourceId, remotePath, page = -1, info = info)
     }
+
+    /**
+     * Gallery rows in the order the browse UI currently shows them.
+     *
+     * Prev/next must follow what the user sees, so the playlist reuses the exact
+     * same filter + sort the UI applies instead of the raw listing order.
+     */
+    fun orderedGalleryRows(
+        entries: List<BrowseEntry>,
+        mode: BrowseSortMode,
+        ascending: Boolean,
+    ): List<BrowseEntry> = entries
+        .toBrowseSections()
+        .galleries
+        .sortedForBrowseFolderUi(
+            mode,
+            ascending,
+            nameOf = { it.name },
+            dateOf = { it.lastModifiedMs },
+        )
+
+    fun orderedRemoteGalleryRows(
+        entries: List<BrowseEntryRemote>,
+        mode: BrowseSortMode,
+        ascending: Boolean,
+    ): List<BrowseEntryRemote> = entries
+        .toRemoteBrowseSections()
+        .galleries
+        .sortedForBrowseFolderUi(
+            mode,
+            ascending,
+            nameOf = { it.name },
+            dateOf = { it.lastModifiedMs },
+        )
+
+    private fun sortedGalleryRows(entries: List<BrowseEntry>): List<BrowseEntry> = orderedGalleryRows(
+        entries,
+        BrowseSortMode.fromPref(Settings.browseSortMode.value),
+        Settings.browseSortAscending.value,
+    )
+
+    private fun sortedRemoteGalleryRows(entries: List<BrowseEntryRemote>): List<BrowseEntryRemote> =
+        orderedRemoteGalleryRows(
+            entries,
+            BrowseSortMode.fromPref(Settings.browseSortMode.value),
+            Settings.browseSortAscending.value,
+        )
 
     private fun zipAsDirPlaylistItem(
         rootId: Long,

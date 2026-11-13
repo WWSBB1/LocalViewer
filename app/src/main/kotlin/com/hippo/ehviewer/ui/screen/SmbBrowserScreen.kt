@@ -825,7 +825,7 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
 
     fun openFolderGallery(entry: BrowseEntryRemote.FolderGallery) {
         val src = source ?: return
-        ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, entries)
+        ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, filteredEntries)
         val remote = if (entry.relativeName.isEmpty()) {
             relativeDir
         } else {
@@ -953,7 +953,7 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
                 info = info,
             )
         }
-        ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, entries)
+        ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, filteredEntries)
         navToSmbFolderReader(src.id, relativeDir, names, info, page)
     }
 
@@ -1157,7 +1157,7 @@ fun AnimatedVisibilityScope.SmbBrowserScreen(
             try {
                 // Parent browse dir (not gated by file/gallery prefs) + file row.
                 recordCurrentBrowseFolderHistory(src.id)
-                ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, entries)
+                ReaderGalleryPlaylist.setFromSmbBrowse(src.id, relativeDir, filteredEntries)
                 // Stream ZIP/CBZ/TAR/CBT/EPUB, solid RAR/CBR/7z, or document extract.
                 if (isStreamableArchiveFileName(entry.fileName) ||
                     isSolidArchiveFileName(entry.fileName) ||

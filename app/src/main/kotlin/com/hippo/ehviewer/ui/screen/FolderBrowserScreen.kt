@@ -851,7 +851,7 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                     rootId = frame.rootId,
                     parentPath = frame.path,
                     parentRelative = frame.relativePath,
-                    entries = entries,
+                    entries = filteredEntries,
                 )
                 navToLocalZipFolderReader(
                     zipPath = zipPath,
@@ -925,14 +925,12 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
             return
         }
         // Playlist = gallery/archive rows in this browse list (lazy galleries), not only
-        // path-parent siblings. When already inside a photo-grid overlay, siblings are
-        // parent-list galleries if we came from a leaf enter; playlist still uses current
-        // entries which is fine for single-gallery open.
+        // path-parent siblings. Prev/next follows the UI's current filter + sort order.
         ReaderGalleryPlaylist.setFromLocalBrowse(
             rootId = frame.rootId,
             parentPath = frame.path,
             parentRelative = frame.relativePath,
-            entries = entries,
+            entries = filteredEntries,
         )
         val rel = folderGalleryRelative(entry, frame)
         val coverKey = entry.coverPath?.toString()
@@ -1138,7 +1136,7 @@ fun AnimatedVisibilityScope.FolderBrowserScreen(
                 rootId = frame.rootId,
                 parentPath = frame.path,
                 parentRelative = frame.relativePath,
-                entries = entries,
+                entries = filteredEntries,
             )
         }
         val path = entry.path.toString()

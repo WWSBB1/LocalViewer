@@ -911,7 +911,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
 
     fun openFolderGallery(entry: BrowseEntryRemote.FolderGallery) {
         val src = source ?: return
-        ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, entries)
+        ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, filteredEntries)
         val remote = if (entry.relativeName.isEmpty()) {
             relativeDir
         } else {
@@ -1033,7 +1033,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
                 info = info,
             )
         }
-        ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, entries)
+        ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, filteredEntries)
         navToWebDavFolderReader(src.id, relativeDir, names, info, page)
     }
 
@@ -1237,7 +1237,7 @@ fun AnimatedVisibilityScope.WebDavBrowserScreen(
             try {
                 // Parent browse dir (not gated by file/gallery prefs) + file row.
                 recordCurrentBrowseFolderHistory(src.id)
-                ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, entries)
+                ReaderGalleryPlaylist.setFromWebDavBrowse(src.id, relativeDir, filteredEntries)
                 if (isStreamableArchiveFileName(entry.fileName) ||
                     isSolidArchiveFileName(entry.fileName) ||
                     isDocumentFileName(entry.fileName)

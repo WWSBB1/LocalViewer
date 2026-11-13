@@ -54,7 +54,10 @@ enum class BrowseSortMode(val prefValue: Int) {
 }
 
 /**
- * UI-only folder listing order. Listing / scan / thumbs / open-gallery keep name order.
+ * Folder listing order for the browse UI **and** reader prev/next.
+ *
+ * Both must use this same function: the playlist is built from the rows the user
+ * actually sees, so double-tap walks the sorted order instead of raw listing order.
  */
 fun <T> Iterable<T>.sortedForBrowseFolderUi(
     mode: BrowseSortMode,
