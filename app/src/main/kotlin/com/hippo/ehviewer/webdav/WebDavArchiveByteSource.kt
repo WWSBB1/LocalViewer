@@ -169,7 +169,9 @@ private class RawWebDavArchiveByteSource(
     } catch (_: CancellationException) {
         null
     } catch (e: Throwable) {
-        if (closed.get()) {
+        // Thread interrupt from player release / close cancels runBlocking — not a fault.
+        if (closed.get() || e is InterruptedException || e.cause is InterruptedException) {
+            Thread.interrupted() // clear flag so pooled workers stay usable
             null
         } else {
             logcat("WebDavArchive", e)
@@ -203,7 +205,12 @@ private class RawWebDavArchiveByteSource(
         } catch (e: CancellationException) {
             -1
         } catch (e: Throwable) {
-            if (closed.get()) return -1
+            // Prefetch cancel / player release interrupts in-flight runBlocking — not a fault.
+            // Same treatment as SmbArchiveByteSource.readAt.
+            if (closed.get() || e is InterruptedException || e.cause is InterruptedException) {
+                Thread.interrupted() // clear flag so pooled workers stay usable
+                return -1
+            }
             logcat("WebDavArchive", e)
             -1
         }
