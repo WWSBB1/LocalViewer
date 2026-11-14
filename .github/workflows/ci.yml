@@ -90,6 +90,17 @@ jobs:
       - name: Build
         run: ./gradlew assembleDefaultRelease
 
+      # Debug variant (applicationIdSuffix .debug, Android debug keystore) so the
+      # phone build can be tested side by side with the release install.
+      - name: Build debug
+        run: ./gradlew assembleDefaultDebug
+
+      - name: Upload debug ARM64
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-arm64-v8a-${{ github.sha }}
+          path: app/build/outputs/apk/default/debug/app-default-arm64-v8a-debug.apk
+
       # Artifact channel token must match BuildConfig.RELEASE_CHANNEL (default | easytier)
       # so in-app CI update picks the same build family as the installed app.
       - name: Detect release channel
