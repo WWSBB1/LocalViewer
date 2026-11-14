@@ -24,6 +24,15 @@ fun launchUI(block: suspend CoroutineScope.() -> Unit) = launch(Dispatchers.Main
 
 suspend fun <T> withUIContext(block: suspend CoroutineScope.() -> T) = withContext(Dispatchers.Main, block)
 
+/**
+ * Launch on an explicit [target] scope instead of the ambient context receiver.
+ *
+ * Needed where a job must outlive the composable that starts it: the ambient
+ * `launch` above binds to the composition scope and dies with it.
+ */
+fun launchOn(target: CoroutineScope, block: suspend CoroutineScope.() -> Unit) =
+    target.launch(block = block)
+
 suspend fun <T> withIOContext(block: suspend CoroutineScope.() -> T) = withContext(Dispatchers.IO, block)
 
 suspend fun <T> withNonCancellableContext(block: suspend CoroutineScope.() -> T) = withContext(NonCancellable, block)

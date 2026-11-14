@@ -334,8 +334,7 @@ object ReaderGalleryPlaylist {
         entries: List<BrowseEntry>,
         mode: BrowseSortMode,
         ascending: Boolean,
-    ): List<BrowseEntry> = entries
-        .toBrowseSections()
+    ): List<BrowseEntry> = entries.toBrowseSections()
         .galleries
         .sortedForBrowseFolderUi(
             mode,
@@ -348,8 +347,7 @@ object ReaderGalleryPlaylist {
         entries: List<BrowseEntryRemote>,
         mode: BrowseSortMode,
         ascending: Boolean,
-    ): List<BrowseEntryRemote> = entries
-        .toRemoteBrowseSections()
+    ): List<BrowseEntryRemote> = entries.toRemoteBrowseSections()
         .galleries
         .sortedForBrowseFolderUi(
             mode,
@@ -358,11 +356,12 @@ object ReaderGalleryPlaylist {
             dateOf = { it.lastModifiedMs },
         )
 
-    private fun sortedGalleryRows(entries: List<BrowseEntry>): List<BrowseEntry> = orderedGalleryRows(
-        entries,
-        BrowseSortMode.fromPref(Settings.browseSortMode.value),
-        Settings.browseSortAscending.value,
-    )
+    private fun sortedGalleryRows(entries: List<BrowseEntry>): List<BrowseEntry> =
+        orderedGalleryRows(
+            entries,
+            BrowseSortMode.fromPref(Settings.browseSortMode.value),
+            Settings.browseSortAscending.value,
+        )
 
     private fun sortedRemoteGalleryRows(entries: List<BrowseEntryRemote>): List<BrowseEntryRemote> =
         orderedRemoteGalleryRows(

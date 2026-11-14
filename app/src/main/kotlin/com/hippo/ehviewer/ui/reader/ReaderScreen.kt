@@ -84,6 +84,7 @@ import com.ehviewer.core.ui.util.rememberSystemUiController
 import com.ehviewer.core.ui.util.thenIf
 import com.ehviewer.core.util.launch
 import com.ehviewer.core.util.launchIO
+import com.ehviewer.core.util.launchOn
 import com.ehviewer.core.util.unreachable
 import com.ehviewer.core.util.withIOContext
 import com.hippo.ehviewer.EhDB
@@ -856,14 +857,17 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
             if (!folderNavBusy.compareAndSet(false, true)) return
             // Navigate on Main after the gesture/input frame finishes — avoids
             // Compose "Cannot start a writer when a reader is pending" crashes.
-            activity.lifecycleScope.launch {
+            // Runs on the Activity scope, not the composition scope: pageLoader.close()
+            // below tears the reader down before nav.navigate runs, and a
+            // rememberCoroutineScope would be cancelled right there.
+            launchOn(activity.lifecycleScope) {
                 try {
                     val sibling = withIOContext {
                         runCatching { GallerySiblingNavigator.sibling(args, next) }
                             .onFailure { com.ehviewer.core.util.logcat("SiblingNav", it) }
                             .onSuccess { if (it == null) com.ehviewer.core.util.logcat("SiblingNav") { "no sibling next=$next args=$args" } }
                             .getOrNull()
-                    } ?: return@launch
+                    } ?: return@launchOn
                     // Progress FK for sibling gallery + bump History (library gallery or browse path).
                     sibling.let { s ->
                         withIOContext {
