@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import arrow.core.Either
 import arrow.core.Either.Companion.catch
 import arrow.core.raise.ensure
@@ -847,11 +848,15 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
         }
         // Same path as double-tap prev/next gallery (folder mode); shared by gesture + FABs.
         val folderNavBusy = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+        // Sibling navigation outlives this composition: pageLoader.close() below tears the
+        // reader (and any rememberCoroutineScope) down before nav.navigate runs, which used
+        // to throw ForgottenCoroutineScopeException and drop the navigation. Anchor it to the
+        // Activity lifecycle instead so it survives the reader being replaced.
         fun goFolder(next: Boolean) {
             if (!folderNavBusy.compareAndSet(false, true)) return
             // Navigate on Main after the gesture/input frame finishes — avoids
             // Compose "Cannot start a writer when a reader is pending" crashes.
-            launch {
+            activity.lifecycleScope.launch {
                 try {
                     val sibling = withIOContext {
                         runCatching { GallerySiblingNavigator.sibling(args, next) }
