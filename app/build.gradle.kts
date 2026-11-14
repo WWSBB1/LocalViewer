@@ -58,6 +58,15 @@ android {
         enableV4Signing = true
     }
 
+    // Fixed debug key so CI-built .debug APKs upgrade in place over local builds.
+    // A per-machine ~/.android/debug.keystore would sign every runner differently.
+    val debugSignConfig = signingConfigs.create("debugFixed") {
+        storeFile = File(projectDir.path + "/keystore/debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+    }
+
     val commitSha = providers.exec {
         commandLine = "git rev-parse --short=7 HEAD".split(' ')
     }.standardOutput.asText.get().trim()
@@ -167,6 +176,7 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            signingConfig = debugSignConfig
         }
         create("benchmarkRelease") {
             initWith(buildTypes.getByName("release"))
