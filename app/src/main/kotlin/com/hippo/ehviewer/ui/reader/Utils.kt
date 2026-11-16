@@ -2,6 +2,9 @@ package com.hippo.ehviewer.ui.reader
 
 import android.app.Activity
 import android.view.WindowManager
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListState
@@ -63,9 +66,20 @@ fun ContentScale.Companion.fromPreferences(value: Int, srcSize: Size, dstSize: S
     else -> Fit
 }
 
+/**
+ * Page flip animation. The Compose default is [spring], which keeps settling for a
+ * few hundred ms after the finger has gone — rapid taps land on a pager that is
+ * still animating and feel sluggish. A short tween without overshoot tracks taps
+ * immediately while still keeping the transition.
+ */
+private val pageFlipAnimation: FiniteAnimationSpec<Float> = tween(
+    durationMillis = 120,
+    easing = FastOutLinearInEasing,
+)
+
 suspend fun PagerState.performScrollToPage(page: Int) {
     if (Settings.pageTransitions.value) {
-        animateScrollToPage(page)
+        animateScrollToPage(page, animationSpec = pageFlipAnimation)
     } else {
         scrollToPage(page)
     }
