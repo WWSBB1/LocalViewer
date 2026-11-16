@@ -10,15 +10,28 @@ import androidx.compose.ui.input.key.type
 fun Modifier.keyEventHandler(
     volumeKeysEnabled: () -> Boolean,
     volumeKeysInverted: () -> Boolean,
+    volumeKeysSwitchGallery: () -> Boolean = { false },
     movePrevious: () -> Unit,
     moveNext: () -> Unit,
+    prevGallery: () -> Unit = {},
+    nextGallery: () -> Unit = {},
 ) = onPreviewKeyEvent {
     if (it.type == KeyEventType.KeyDown) {
         when (it.key) {
             Key.DirectionUp, Key.PageUp -> movePrevious()
             Key.DirectionDown, Key.PageDown -> moveNext()
-            Key.VolumeUp if volumeKeysEnabled() -> if (volumeKeysInverted()) moveNext() else movePrevious()
-            Key.VolumeDown if volumeKeysEnabled() -> if (volumeKeysInverted()) movePrevious() else moveNext()
+            Key.VolumeUp if volumeKeysEnabled() ->
+                if (volumeKeysSwitchGallery()) {
+                    if (volumeKeysInverted()) nextGallery() else prevGallery()
+                } else {
+                    if (volumeKeysInverted()) moveNext() else movePrevious()
+                }
+            Key.VolumeDown if volumeKeysEnabled() ->
+                if (volumeKeysSwitchGallery()) {
+                    if (volumeKeysInverted()) prevGallery() else nextGallery()
+                } else {
+                    if (volumeKeysInverted()) movePrevious() else moveNext()
+                }
             else -> return@onPreviewKeyEvent false
         }
         true

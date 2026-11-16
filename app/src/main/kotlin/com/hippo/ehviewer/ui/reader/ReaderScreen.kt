@@ -523,6 +523,9 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
     }
     val volumeKeysEnabled by Settings.readWithVolumeKeys.collectAsState()
     val volumeKeysInverted by Settings.readWithVolumeKeysInverted.collectAsState()
+    // When on, volume keys switch galleries and edge double-tap gallery navigation is
+    // disabled: the same gesture is used for rapid page turning and kept overshooting.
+    val volumeKeysSwitchGallery by Settings.readVolumeKeysSwitchGallery.collectAsState()
     val fullscreen by Settings.fullscreen.collectAsState()
     val cutoutShort by Settings.cutoutShort.collectAsState()
     val keepScreenOn by Settings.keepScreenOn.collectAsState()
@@ -769,84 +772,6 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    Box(
-        Modifier.keyEventHandler(
-            volumeKeysEnabled = { volumeKeysEnabled && !appbarVisible },
-            volumeKeysInverted = { volumeKeysInverted },
-            movePrevious = {
-                launch {
-                    when {
-                        isWebtoon && webtoonHorizontal -> lazyListState.scrollLeft()
-                        isWebtoon -> lazyListState.scrollUp()
-                        else -> pagerState.moveToPrevious()
-                    }
-                }
-            },
-            moveNext = {
-                launch {
-                    when {
-                        isWebtoon && webtoonHorizontal -> lazyListState.scrollRight()
-                        isWebtoon -> lazyListState.scrollDown()
-                        else -> pagerState.moveToNext()
-                    }
-                }
-            },
-        ).focusRequester(focusRequester).focusable().thenIf(keepScreenOn) { keepScreenOn() },
-    ) {
-        LaunchedEffect(Unit) {
-            focusRequester.requestFocus()
-        }
-        syncState.Sync(
-            webtoon = isWebtoon,
-            pagerDual = pagerDual,
-            webtoonHorizontal = webtoonHorizontal,
-        )
-        val bgColor by collectBackgroundColorAsState()
-        LaunchedEffect(fullscreen) {
-            snapshotFlow { appbarVisible }.collect { visible ->
-                // Show bars only for in-reader chrome; keep immersive otherwise.
-                // Icon contrast is owned by the outer ReaderScreen (reversed app theme).
-                uiController.isSystemBarsVisible = visible || !fullscreen
-                uiController.showTransientSystemBarsBySwipe = true
-            }
-        }
-        var showNavigationOverlay by remember {
-            val showOnStart = Settings.showNavigationOverlayNewUser.value || Settings.showNavigationOverlayOnStart.value
-            Settings.showNavigationOverlayNewUser.value = false
-            mutableStateOf(showOnStart)
-        }
-        val onSelectPage = { page: Page ->
-            if (Settings.readerLongTapAction.value) {
-                launch {
-                    val blocked = page.status is PageStatus.Blocked
-                    dialog { cont ->
-                        // hide() + onDismissRequest can both run; never double-resume.
-                        fun dispose() {
-                            if (cont.isActive) cont.resume(Unit)
-                        }
-                        val state = rememberModalBottomSheetState()
-                        ModalBottomSheet(
-                            onDismissRequest = { dispose() },
-                            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
-                            sheetState = state,
-                            contentWindowInsets = { WindowInsets() },
-                        ) {
-                            ReaderPageSheetMeta(
-                                retry = { pageLoader.retryPage(page.index) },
-                                retryOrigin = { pageLoader.retryPage(page.index, true) },
-                                share = { launchIO { with(pageLoader) { shareImage(page, info) } } },
-                                copy = { launchIO { with(pageLoader) { copy(page) } } },
-                                save = { launchIO { with(pageLoader) { save(page) } } },
-                                saveTo = { launchIO { with(pageLoader) { saveTo(page) } } },
-                                showAds = { page.unblock() }.takeIf { blocked },
-                                // hide() ends with onDismissRequest → dispose once.
-                                dismiss = { launch { runCatching { state.hide() }.onFailure { dispose() } } },
-                            )
-                        }
-                    }
-                }
-            }
-        }
         // Same path as double-tap prev/next gallery (folder mode); shared by gesture + FABs.
         val folderNavBusy = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
         // Sibling navigation outlives this composition: pageLoader.close() below tears the
@@ -981,6 +906,88 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
                 }
             }
         }
+
+    Box(
+        Modifier.keyEventHandler(
+            volumeKeysEnabled = { volumeKeysEnabled && !appbarVisible },
+            volumeKeysInverted = { volumeKeysInverted },
+            volumeKeysSwitchGallery = { volumeKeysSwitchGallery },
+            movePrevious = {
+                launch {
+                    when {
+                        isWebtoon && webtoonHorizontal -> lazyListState.scrollLeft()
+                        isWebtoon -> lazyListState.scrollUp()
+                        else -> pagerState.moveToPrevious()
+                    }
+                }
+            },
+            moveNext = {
+                launch {
+                    when {
+                        isWebtoon && webtoonHorizontal -> lazyListState.scrollRight()
+                        isWebtoon -> lazyListState.scrollDown()
+                        else -> pagerState.moveToNext()
+                    }
+                }
+            },
+            prevGallery = { goFolder(next = false) },
+            nextGallery = { goFolder(next = true) },
+        ).focusRequester(focusRequester).focusable().thenIf(keepScreenOn) { keepScreenOn() },
+    ) {
+        LaunchedEffect(Unit) {
+            focusRequester.requestFocus()
+        }
+        syncState.Sync(
+            webtoon = isWebtoon,
+            pagerDual = pagerDual,
+            webtoonHorizontal = webtoonHorizontal,
+        )
+        val bgColor by collectBackgroundColorAsState()
+        LaunchedEffect(fullscreen) {
+            snapshotFlow { appbarVisible }.collect { visible ->
+                // Show bars only for in-reader chrome; keep immersive otherwise.
+                // Icon contrast is owned by the outer ReaderScreen (reversed app theme).
+                uiController.isSystemBarsVisible = visible || !fullscreen
+                uiController.showTransientSystemBarsBySwipe = true
+            }
+        }
+        var showNavigationOverlay by remember {
+            val showOnStart = Settings.showNavigationOverlayNewUser.value || Settings.showNavigationOverlayOnStart.value
+            Settings.showNavigationOverlayNewUser.value = false
+            mutableStateOf(showOnStart)
+        }
+        val onSelectPage = { page: Page ->
+            if (Settings.readerLongTapAction.value) {
+                launch {
+                    val blocked = page.status is PageStatus.Blocked
+                    dialog { cont ->
+                        // hide() + onDismissRequest can both run; never double-resume.
+                        fun dispose() {
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                        val state = rememberModalBottomSheetState()
+                        ModalBottomSheet(
+                            onDismissRequest = { dispose() },
+                            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
+                            sheetState = state,
+                            contentWindowInsets = { WindowInsets() },
+                        ) {
+                            ReaderPageSheetMeta(
+                                retry = { pageLoader.retryPage(page.index) },
+                                retryOrigin = { pageLoader.retryPage(page.index, true) },
+                                share = { launchIO { with(pageLoader) { shareImage(page, info) } } },
+                                copy = { launchIO { with(pageLoader) { copy(page) } } },
+                                save = { launchIO { with(pageLoader) { save(page) } } },
+                                saveTo = { launchIO { with(pageLoader) { saveTo(page) } } },
+                                showAds = { page.unblock() }.takeIf { blocked },
+                                // hide() ends with onDismissRequest → dispose once.
+                                dismiss = { launch { runCatching { state.hide() }.onFailure { dispose() } } },
+                            )
+                        }
+                    }
+                }
+            }
+        }
         EhTheme(useDarkTheme = bgColor != Color.White, applySystemBarAppearance = false) {
             val insets = if (fullscreen) {
                 if (cutoutShort) {
@@ -1004,8 +1011,10 @@ fun ReaderScreen(pageLoader: ReaderSession, info: BaseGalleryInfo?, args: Reader
                 onMenuRegionClick = {
                     if (!suppressPageClick) appbarVisible = !appbarVisible
                 },
-                onPrevFolder = { goFolder(next = false) },
-                onNextFolder = { goFolder(next = true) },
+                // With volume-key gallery switching on, edge double-tap no longer jumps
+                // galleries — that gesture is reserved for rapid page turning.
+                onPrevFolder = { if (!volumeKeysSwitchGallery) goFolder(next = false) },
+                onNextFolder = { if (!volumeKeysSwitchGallery) goFolder(next = true) },
                 // Same path as edge-swipe / system back (OnBackPressedDispatcher callbacks).
                 onBack = { activity.onBackPressedDispatcher.onBackPressed() },
                 dualActive = dualActive,

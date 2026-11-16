@@ -544,6 +544,7 @@
     <string name="settings_eh_filter_summary">Block gallery or comment by title, uploader, tags and commenter</string>
     <string name="settings_read_volume_page">Use volume keys to turn pages</string>
     <string name="settings_read_reverse_volume">Reverse volume keys</string>
+    <string name="settings_read_volume_switch_gallery">Use volume keys to switch galleries (turns off edge double-tap)</string>
     <string name="settings_block_extraneous_ads">[Experimental] Block extraneous ads</string>
     <string name="settings_ads_placeholder">[Optional] Pick placeholder to replace ads</string>
     <string name="settings_download">Download</string>

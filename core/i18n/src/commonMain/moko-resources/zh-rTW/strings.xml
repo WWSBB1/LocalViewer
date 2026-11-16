@@ -546,6 +546,7 @@
     <string name="settings_eh_filter_summary">根據標題、上傳者、標籤、評論者隱藏圖庫或評論</string>
     <string name="settings_read_volume_page">使用音量鍵翻頁</string>
     <string name="settings_read_reverse_volume">反轉音量鍵</string>
+    <string name="settings_read_volume_switch_gallery">使用音量鍵切換上/下一個圖庫（會關閉雙擊左右跳轉）</string>
     <string name="settings_download">下載</string>
     <string name="settings_download_download_location">下載路徑</string>
     <string name="settings_download_cant_get_download_location">無法取得下載路徑</string>

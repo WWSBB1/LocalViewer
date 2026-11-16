@@ -113,9 +113,15 @@ fun ReaderGeneralSetting() = Column(modifier = Modifier.verticalScroll(rememberS
         field = volume,
     )
     AnimatedVisibility(visible = volume.value) {
-        SwitchChoice(
-            title = stringResource(id = R.string.settings_read_reverse_volume),
-            field = Settings.readWithVolumeKeysInverted.asMutableState(),
-        )
+        Column {
+            SwitchChoice(
+                title = stringResource(id = R.string.settings_read_reverse_volume),
+                field = Settings.readWithVolumeKeysInverted.asMutableState(),
+            )
+            SwitchChoice(
+                title = stringResource(id = R.string.settings_read_volume_switch_gallery),
+                field = Settings.readVolumeKeysSwitchGallery.asMutableState(),
+            )
+        }
     }
 }

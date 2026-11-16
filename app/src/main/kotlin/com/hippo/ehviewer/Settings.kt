@@ -681,6 +681,13 @@ object Settings : DataStorePreferences(null) {
     val pageTransitions = boolPref("pref_enable_transitions_key", true)
     val readWithVolumeKeys = boolPref("reader_volume_keys", false)
     val readWithVolumeKeysInverted = boolPref("reader_volume_keys_inverted", false)
+
+    /**
+     * Volume keys switch to the prev/next **gallery** instead of turning pages.
+     * While on, edge double-tap gallery navigation is disabled too — the same
+     * gesture is used for rapid page turning and kept firing accidentally.
+     */
+    val readVolumeKeysSwitchGallery = boolPref("reader_volume_keys_switch_gallery", false)
     val grayScale = boolPref("pref_grayscale", false)
     val invertedColors = boolPref("pref_inverted_colors", false)
     val readerWebtoonNav = intPref("reader_navigation_mode_webtoon", 0)
