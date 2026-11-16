@@ -80,7 +80,9 @@ fun WebtoonViewer(
         val edge = if (horizontal) viewportPx.height else viewportPx.width
         (edge * paddingPercent / 100f).toDp()
     }
-    val doubleTap = remember(navigator, onPrevFolder, onNextFolder, onBack, isRtl, viewportSize) {
+    val doubleTapToZoom by Settings.doubleTapToZoom.collectAsState()
+    val galleryNavEnabled by Settings.readVolumeKeysSwitchGallery.collectAsState()
+    val doubleTap = remember(navigator, onPrevFolder, onNextFolder, onBack, isRtl, viewportSize, doubleTapToZoom, galleryNavEnabled) {
         doubleTapAction(
             isRtl = isRtl,
             getViewportSize = {
@@ -90,6 +92,7 @@ fun WebtoonViewer(
             onPrevFolder = onPrevFolder,
             onNextFolder = onNextFolder,
             onBack = onBack,
+            galleryNavAvailable = { !galleryNavEnabled },
         )
     }
 

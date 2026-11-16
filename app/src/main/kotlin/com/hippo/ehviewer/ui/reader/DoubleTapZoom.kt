@@ -14,6 +14,11 @@ import me.saket.telephoto.zoomable.ZoomableState
  * - [Settings.doubleTapToZoom] on → zoom in/out (original behavior).
  * - off → prev/next **gallery** (folder, archive, or document) on edge zones;
  *   **MENU (center)** acts like system back.
+ *
+ * Returns null when double-tap currently does nothing. Passing null to
+ * `Modifier.zoomable(onDoubleClick = null)` drops the double-tap detector entirely,
+ * which lets `onClick` fire immediately — otherwise every single tap waits out the
+ * double-tap timeout (~300 ms) and rapid taps get swallowed as candidate doubles.
  */
 fun doubleTapAction(
     isRtl: Boolean,
@@ -22,32 +27,37 @@ fun doubleTapAction(
     onPrevFolder: () -> Unit,
     onNextFolder: () -> Unit,
     onBack: () -> Unit = {},
-): DoubleClickToZoomListener = object : DoubleClickToZoomListener {
-    override suspend fun onDoubleClick(state: ZoomableState, centroid: Offset) {
-        if (Settings.doubleTapToZoom.value) {
-            val zoomFraction = state.zoomFraction ?: return
-            if (zoomFraction > 0.05f) {
-                state.resetZoom()
-            } else {
-                // Workaround for https://github.com/saket/telephoto/issues/45
-                state.zoomTo(
-                    zoomFactor = state.contentTransformation.scaleMetadata.initialScale.scaleX * 2f,
-                    centroid = centroid,
-                )
+    galleryNavAvailable: () -> Boolean = { true },
+): DoubleClickToZoomListener? {
+    // Nothing to do: zoom is off and gallery jumping is unavailable.
+    if (!Settings.doubleTapToZoom.value && !galleryNavAvailable()) return null
+    return object : DoubleClickToZoomListener {
+        override suspend fun onDoubleClick(state: ZoomableState, centroid: Offset) {
+            if (Settings.doubleTapToZoom.value) {
+                val zoomFraction = state.zoomFraction ?: return
+                if (zoomFraction > 0.05f) {
+                    state.resetZoom()
+                } else {
+                    // Workaround for https://github.com/saket/telephoto/issues/45
+                    state.zoomTo(
+                        zoomFactor = state.contentTransformation.scaleMetadata.initialScale.scaleX * 2f,
+                        centroid = centroid,
+                    )
+                }
+                return
             }
-            return
-        }
 
-        val size = getViewportSize()
-        if (size.width <= 0f || size.height <= 0f) return
-        val region = getNavigator().getAction(Offset(centroid.x / size.width, centroid.y / size.height))
-        when (region) {
-            NavigationRegion.NEXT -> onNextFolder()
-            NavigationRegion.PREV -> onPrevFolder()
-            NavigationRegion.RIGHT -> if (isRtl) onPrevFolder() else onNextFolder()
-            NavigationRegion.LEFT -> if (isRtl) onNextFolder() else onPrevFolder()
-            // Same center zone as single-tap menu / seekbar chrome.
-            NavigationRegion.MENU -> onBack()
+            val size = getViewportSize()
+            if (size.width <= 0f || size.height <= 0f) return
+            val region = getNavigator().getAction(Offset(centroid.x / size.width, centroid.y / size.height))
+            when (region) {
+                NavigationRegion.NEXT -> onNextFolder()
+                NavigationRegion.PREV -> onPrevFolder()
+                NavigationRegion.RIGHT -> if (isRtl) onPrevFolder() else onNextFolder()
+                NavigationRegion.LEFT -> if (isRtl) onNextFolder() else onPrevFolder()
+                // Same center zone as single-tap menu / seekbar chrome.
+                NavigationRegion.MENU -> onBack()
+            }
         }
     }
 }

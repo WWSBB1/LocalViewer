@@ -88,7 +88,12 @@ fun PagerViewer(
             pagerState.layoutInfo.viewportSize.toSize()
         }
     }
-    val doubleTap = remember(isRtl, navigator, onPrevFolder, onNextFolder, onBack) {
+    // Settings that decide whether double-tap does anything at all. When both zoom and
+    // gallery jumping are off, the double-tap detector is dropped so single taps fire
+    // immediately instead of waiting out the double-tap timeout.
+    val doubleTapToZoom by Settings.doubleTapToZoom.collectAsState()
+    val galleryNavEnabled by Settings.readVolumeKeysSwitchGallery.collectAsState()
+    val doubleTap = remember(isRtl, navigator, onPrevFolder, onNextFolder, onBack, doubleTapToZoom, galleryNavEnabled) {
         doubleTapAction(
             isRtl = isRtl,
             getViewportSize = {
@@ -100,6 +105,7 @@ fun PagerViewer(
             onPrevFolder = onPrevFolder,
             onNextFolder = onNextFolder,
             onBack = onBack,
+            galleryNavAvailable = { !galleryNavEnabled },
         )
     }
     // Vertical is never RTL; dual spreads still use LTR left/right order.
@@ -187,7 +193,7 @@ private fun DualPageContainer(
     pagerState: PagerState,
     onSelectPage: (Page) -> Unit,
     onMenuRegionClick: () -> Unit,
-    onDoubleClick: DoubleClickToZoomListener,
+    onDoubleClick: DoubleClickToZoomListener?,
     scope: CoroutineScope,
 ) {
     @Suppress("NAME_SHADOWING")
@@ -323,7 +329,7 @@ private fun PageContainer(
     pagerState: PagerState,
     onSelectPage: (Page) -> Unit,
     onMenuRegionClick: () -> Unit,
-    onDoubleClick: DoubleClickToZoomListener,
+    onDoubleClick: DoubleClickToZoomListener?,
     scope: CoroutineScope,
 ) {
     @Suppress("NAME_SHADOWING")
